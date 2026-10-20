@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # Manual publish. It is also the only path that can work before the package
+  # exists on npm: trusted publishing needs a package page to attach the
+  # publisher to, and a brand-new package has none.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,6 +27,7 @@ jobs:
           cache: npm
 
       - name: Verify version matches tag
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
@@ -40,7 +45,21 @@ jobs:
       - name: Test
         run: npm run test && npm run typecheck
 
+      # A tag run still builds and tests (and stays green); it skips only the
+      # publish step until the package exists. After the first manual publish the
+      # trusted publisher is configured and tagged releases publish again.
+      - name: Check whether the package exists on npm
+        id: on-npm
+        run: |
+          if npm view @dahch/muninn version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::@dahch/muninn is not on npm yet; skipping publish (the first publish is manual)."
+          fi
+
       - name: Publish to npm
+        if: github.event_name == 'workflow_dispatch' || steps.on-npm.outputs.exists == 'true'
         run: |
           version="$(node -p "require('./package.json').version")"
           if [[ "$version" == *-* ]]; then
