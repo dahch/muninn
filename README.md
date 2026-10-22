@@ -122,6 +122,10 @@ Subpath entry points are available for narrower imports:
 
 ## Development
 
+The design of the engine — SQLite/FTS5 schema, service core, MCP server, CLI, contract verifier and
+AST indexer — is documented in [`DESIGN.md`](./DESIGN.md), moved here from the orchestrator's design
+document when Muninn became its own package.
+
 ```sh
 npm ci
 npm run build      # tsc -> dist/ (+ schema.sql, +x cli.js)
