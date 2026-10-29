@@ -134,9 +134,19 @@ npm run typecheck  # tsc --noEmit
 bun run src/cli.ts memory init --project .
 ```
 
-Publishing is tag-driven: `git tag v0.1.0 && git push --tags` runs
-`.github/workflows/publish.yml`, which verifies the tag matches `package.json`, builds, tests and
-publishes to npm.
+Publishing is tag-driven, but only once the package exists. The **first** publish is manual, from a
+logged-in machine, because npm's trusted publishing attaches to a package page that has to exist first:
+
+```sh
+npm login
+npm run build && npm publish   # 0.1.0, once
+```
+
+After that, configure the trusted publisher on npm (repository `dahch/muninn`, workflow
+`publish.yml`) and tagged releases need no token at all: `git tag v0.1.1 && git push origin v0.1.1`
+runs the workflow, which checks the tag against `package.json`, builds, tests and publishes over
+OIDC. A run whose version is already on npm skips the publish step and refreshes the GitHub release
+instead, so re-tagging to fix a message stays safe.
 
 ## License
 

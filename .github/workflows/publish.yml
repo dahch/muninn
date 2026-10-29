@@ -4,9 +4,12 @@ on:
   push:
     tags:
       - "v*"
-  # Manual publish. It is also the only path that can work before the package
-  # exists on npm: trusted publishing needs a package page to attach the
-  # publisher to, and a brand-new package has none.
+  # Manual run: re-run the pipeline for a version whose tagged run failed before
+  # the publish step. It cannot create a brand-new package — trusted publishing
+  # attaches to a package page that must exist first — so the first publish is
+  # done once by a maintainer from a logged-in machine:
+  #   npm login && npm run build && npm publish
+  # Everything after that is this workflow.
   workflow_dispatch:
 
 permissions:
@@ -45,25 +48,64 @@ jobs:
       - name: Test
         run: npm run test && npm run typecheck
 
-      # A tag run still builds and tests (and stays green); it skips only the
-      # publish step until the package exists. After the first manual publish the
-      # trusted publisher is configured and tagged releases publish again.
-      - name: Check whether the package exists on npm
+      # Same rule as the orchestrator's: re-tagging is a legitimate repair, and
+      # npm rejects a version that already exists. Skip that step, keep the run
+      # green, and let the release job refresh the page instead.
+      - name: Check whether this version is already on npm
         id: on-npm
         run: |
-          if npm view @dahch/muninn version >/dev/null 2>&1; then
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@dahch/muninn@$version" version >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::@dahch/muninn@$version is already published; skipping the publish step."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::@dahch/muninn is not on npm yet; skipping publish (the first publish is manual)."
           fi
 
       - name: Publish to npm
-        if: github.event_name == 'workflow_dispatch' || steps.on-npm.outputs.exists == 'true'
+        if: steps.on-npm.outputs.exists != 'true'
         run: |
           version="$(node -p "require('./package.json').version")"
           if [[ "$version" == *-* ]]; then
             npm publish --provenance --tag next
           else
             npm publish --provenance
+          fi
+
+  release:
+    # A green publish is not a release: the tag needs its notes too.
+    needs: npm
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          awk -v v="$version" '
+            BEGIN { p = 0 }
+            $0 == "## " v { p = 1; next }
+            p && /^## / { exit }
+            p { print }
+          ' CHANGELOG.md > notes.md
+          flags=(--title "$TAG")
+          case "$version" in *-*) flags+=(--prerelease) ;; esac
+          if [ -s notes.md ]; then
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release edit "$TAG" "${flags[@]}" --notes-file notes.md
+            else
+              gh release create "$TAG" --verify-tag "${flags[@]}" --notes-file notes.md
+            fi
+          elif gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::no changelog section for $version; leaving the existing release alone"
+          else
+            gh release create "$TAG" --verify-tag "${flags[@]}" --generate-notes
           fi
