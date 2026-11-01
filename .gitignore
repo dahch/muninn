@@ -8,3 +8,7 @@ coverage/
 .huginn/
 .env
 .env.*
+# npm is canonical here (package-lock.json is tracked); a pnpm install's lockfile
+# and `npm pack` tarballs are local artifacts, not sources.
+pnpm-lock.yaml
+*.tgz
