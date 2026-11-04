@@ -5,8 +5,10 @@ import Database from "better-sqlite3";
 import { assertDocPath } from "../util/path-safety.js";
 import {
   getDatabase,
+  getReadOnlyDatabase,
   ensureProject,
   findGitRoot,
+  tryGetGitRemote,
   type Project,
   type Observation,
   type Entity,
@@ -123,6 +125,60 @@ export interface MemoryServiceOptions {
   projectRoot?: string;
 }
 
+export const DEFAULT_SESSION_BRIEF_BUDGET = 8_000;
+export const MAX_SESSION_BRIEF_BUDGET = 20_000;
+export const MAX_SESSION_BRIEF_PATHS = 20;
+export const SESSION_BRIEF_RECENT_ACTIVITY_LIMIT = 20;
+
+export interface SessionBriefOptions {
+  paths?: string[] | null;
+  budgetChars?: number | null;
+}
+
+export interface SessionBriefRequest extends SessionBriefOptions {
+  dbPath?: string;
+  projectRoot?: string;
+  /** An already-open connection, used by the service method and test adapters. */
+  db?: Database.Database;
+}
+
+export interface SessionBriefProject {
+  id: string | null;
+  name: string;
+  rootPath: string;
+  gitRemote: string | null;
+}
+
+export interface SessionBriefDecisionGroup {
+  topicKey: string;
+  decisions: Observation[];
+}
+
+export interface SessionBriefCounts {
+  /** `null` means the count could not be read; zero is a real, successful count. */
+  observations: number | null;
+  entities: number | null;
+  links: number | null;
+}
+
+export interface SessionBriefContent {
+  project: SessionBriefProject;
+  activeDecisions: {
+    keyed: SessionBriefDecisionGroup[];
+    unkeyed: Observation[];
+  };
+  recentActivity: Observation[];
+  symbols: Entity[];
+  counts: SessionBriefCounts;
+  notes: string[];
+  budgetChars: number;
+}
+
+export interface SessionBrief extends SessionBriefContent {
+  truncated: boolean;
+  markdown: string;
+}
+
 export interface SymbolInspectionDependency {
   entity: Entity;
   relationType: DependencyRelationType;
@@ -152,6 +208,7 @@ export interface IMemoryService {
     projectId?: string
   ): SymbolInspection | null;
   getStats(projectId?: string): MemoryStats;
+  getSessionBrief(options?: SessionBriefOptions): SessionBrief;
   syncToDisk(
     targetPath?: string,
     options?: { projectId?: string; allProjects?: boolean }
@@ -306,6 +363,537 @@ export function sanitizeFtsQuery(query: string): string {
   }
 
   return terms.join(" ");
+}
+
+function sessionBriefError(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message.trim();
+  const message = String(err).trim();
+  return message || "unknown error";
+}
+
+function resolveSessionBriefBudget(value: number | null | undefined): number {
+  const budget = value ?? DEFAULT_SESSION_BRIEF_BUDGET;
+  if (!Number.isInteger(budget) || budget <= 0) {
+    throw new Error("budgetChars must be a positive integer");
+  }
+  if (budget > MAX_SESSION_BRIEF_BUDGET) {
+    throw new Error(
+      `budgetChars cannot exceed ${MAX_SESSION_BRIEF_BUDGET} characters`
+    );
+  }
+  return budget;
+}
+
+/**
+ * Resolve file/directory selections against the project root without touching the
+ * filesystem. The result is a deduplicated list of project-relative POSIX paths;
+ * an empty string means "the whole project root".
+ */
+function resolveSessionBriefPaths(
+  paths: string[] | null | undefined,
+  rootPath: string
+): string[] {
+  const rawPaths = paths ?? [];
+  if (rawPaths.length > MAX_SESSION_BRIEF_PATHS) {
+    throw new Error(
+      `At most ${MAX_SESSION_BRIEF_PATHS} paths may be requested for a session brief`
+    );
+  }
+
+  const root = path.resolve(rootPath);
+  const resolved = rawPaths.map((raw) => {
+    if (typeof raw !== "string") {
+      throw new Error("Session brief paths must be strings");
+    }
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      throw new Error("Session brief paths cannot be empty");
+    }
+    // Accept Windows and POSIX separators, then compare in one canonical form.
+    const withPlatformSeparators = trimmed.replace(/\\/g, path.sep);
+    const absolute = path.isAbsolute(withPlatformSeparators)
+      ? path.resolve(withPlatformSeparators)
+      : path.resolve(root, withPlatformSeparators);
+    const relative = path.relative(root, absolute);
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
+      throw new Error(
+        `Path "${raw}" is outside the project root ${root}`
+      );
+    }
+    return relative.split(path.sep).filter(Boolean).join("/");
+  });
+
+  return [...new Set(resolved)];
+}
+
+function normalizeIndexedFilePath(filePath: string, rootPath: string): string {
+  let normalized = filePath.replace(/\\/g, "/");
+  if (path.isAbsolute(filePath)) {
+    const relative = path.relative(path.resolve(rootPath), path.resolve(filePath));
+    if (
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative)
+    ) {
+      normalized = relative.replace(/\\/g, "/");
+    }
+  }
+  return normalized
+    .replace(/^\.\/+/, "")
+    .replace(/\/+/g, "/")
+    .replace(/\/$/, "");
+}
+
+function entityMatchesSelectedPaths(
+  entityPath: string,
+  selectedPaths: string[],
+  rootPath: string
+): boolean {
+  if (selectedPaths.length === 0) return false;
+  const normalized = normalizeIndexedFilePath(entityPath, rootPath);
+  return selectedPaths.some(
+    (selected) =>
+      selected === "" ||
+      normalized === selected ||
+      normalized.startsWith(`${selected}/`)
+  );
+}
+
+function deriveSessionBriefProject(rootPath: string): SessionBriefProject {
+  const root = path.resolve(rootPath);
+  return {
+    id: null,
+    name: path.basename(root) || "project",
+    rootPath: root,
+    gitRemote: tryGetGitRemote(root),
+  };
+}
+
+function sessionBriefProjectFromRow(project: Project): SessionBriefProject {
+  return {
+    id: project.id,
+    name: project.name,
+    rootPath: project.root_path,
+    gitRemote: project.git_remote,
+  };
+}
+
+function findSessionBriefProjectRow(
+  db: Database.Database,
+  rootPath: string
+): Project | undefined {
+  const root = path.resolve(rootPath);
+  return db
+    .prepare<[string], Project>(
+      `SELECT id, name, git_remote, root_path, created_at
+       FROM projects
+       WHERE root_path = ?`
+    )
+    .get(root);
+}
+
+function formatCount(count: number | null): string {
+  return count === null ? "unavailable" : String(count);
+}
+
+function appendBriefObservation(
+  lines: string[],
+  observation: Observation,
+  labelSuperseded: boolean
+): void {
+  const supersededLabel =
+    labelSuperseded && observation.status === "superseded"
+      ? ` — SUPERSEDED${
+          observation.superseded_by
+            ? ` (replaced by \`${observation.superseded_by}\`)`
+            : ""
+        }`
+      : "";
+  lines.push(
+    `- **${observation.title}** \`[${observation.category}]\`${supersededLabel}`
+  );
+  if (observation.topic_key) {
+    lines.push(`  Topic key: \`${observation.topic_key}\``);
+  }
+  const contentLines = observation.content.split(/\r?\n/);
+  for (const contentLine of contentLines) {
+    lines.push(`  ${contentLine}`);
+  }
+}
+
+function buildSessionBriefMarkdown(content: SessionBriefContent): string {
+  const lines: string[] = [];
+  lines.push(`# Session Brief: ${content.project.name}`, "");
+  lines.push("## Project");
+  lines.push(`- Name: ${content.project.name}`);
+  lines.push(`- Root: \`${content.project.rootPath}\``);
+  if (content.project.id) {
+    lines.push(`- ID: \`${content.project.id}\``);
+  }
+  if (content.project.gitRemote) {
+    lines.push(`- Git remote: ${content.project.gitRemote}`);
+  }
+
+  lines.push("", "## Counts");
+  lines.push(`- Observations: ${formatCount(content.counts.observations)}`);
+  lines.push(`- Entities: ${formatCount(content.counts.entities)}`);
+  lines.push(`- Links: ${formatCount(content.counts.links)}`);
+
+  const keyedDecisions = content.activeDecisions.keyed;
+  const unkeyedDecisions = content.activeDecisions.unkeyed;
+  if (keyedDecisions.length > 0 || unkeyedDecisions.length > 0) {
+    lines.push("", "## Active Decisions");
+    for (const group of keyedDecisions) {
+      lines.push("", `### Topic: ${group.topicKey}`);
+      for (const decision of group.decisions) {
+        appendBriefObservation(lines, decision, false);
+      }
+    }
+    if (unkeyedDecisions.length > 0) {
+      lines.push("", "### Unkeyed decisions");
+      for (const decision of unkeyedDecisions) {
+        appendBriefObservation(lines, decision, false);
+      }
+    }
+  }
+
+  if (content.recentActivity.length > 0) {
+    lines.push("", "## Recent Activity");
+    for (const observation of content.recentActivity) {
+      appendBriefObservation(lines, observation, true);
+    }
+  }
+
+  if (content.symbols.length > 0) {
+    lines.push("", "## Indexed Symbols");
+    for (const symbol of content.symbols) {
+      lines.push(
+        `- \`${symbol.identifier}\` (${symbol.entity_type}) — \`${symbol.file_path}\``
+      );
+    }
+  }
+
+  if (content.notes.length > 0) {
+    lines.push("", "## Notes");
+    for (const note of content.notes) {
+      lines.push(`- ${note}`);
+    }
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+function applySessionBriefBudget(
+  markdown: string,
+  budgetChars: number
+): { markdown: string; truncated: boolean } {
+  if (markdown.length <= budgetChars) {
+    return { markdown, truncated: false };
+  }
+
+  const marker = `\n\n[truncated: output limited to ${budgetChars} characters; increase budgetChars to see the rest]`;
+  if (budgetChars <= marker.length) {
+    // Use a compact marker in small budgets so some useful content still fits.
+    // Even a one-character budget must remain bounded and visibly clipped.
+    const shortMarker = "[truncated]";
+    const contentBudget = budgetChars - shortMarker.length;
+    if (contentBudget > 0) {
+      return {
+        markdown: markdown.slice(0, contentBudget) + shortMarker,
+        truncated: true,
+      };
+    }
+    return {
+      markdown: (
+        shortMarker.slice(0, Math.max(0, budgetChars - 1)) + "…"
+      ).slice(0, budgetChars),
+      truncated: true,
+    };
+  }
+
+  const keep = budgetChars - marker.length;
+  return {
+    markdown: markdown.slice(0, keep) + marker,
+    truncated: true,
+  };
+}
+
+/**
+ * Shared deterministic Markdown renderer used by the library, MCP and CLI.
+ * It measures the complete output, including headings, notes, and the marker,
+ * against `content.budgetChars`.
+ */
+export function renderSessionBrief(content: SessionBriefContent): string {
+  return applySessionBriefBudget(
+    buildSessionBriefMarkdown(content),
+    content.budgetChars
+  ).markdown;
+}
+
+function assembleSessionBrief(
+  db: Database.Database,
+  project: SessionBriefProject,
+  projectId: string | null,
+  selectedPaths: string[],
+  budgetChars: number,
+  notes: string[]
+): SessionBrief {
+  let counts: SessionBriefCounts = {
+    observations: 0,
+    entities: 0,
+    links: 0,
+  };
+  let keyed: SessionBriefDecisionGroup[] = [];
+  let unkeyed: Observation[] = [];
+  let recentActivity: Observation[] = [];
+  let symbols: Entity[] = [];
+
+  if (projectId) {
+    const countObservations = db
+      .prepare<[string], { count: number }>(
+        "SELECT COUNT(*) as count FROM observations WHERE project_id = ?"
+      )
+      .get(projectId)?.count;
+    const countEntities = db
+      .prepare<[string], { count: number }>(
+        "SELECT COUNT(*) as count FROM entities WHERE project_id = ?"
+      )
+      .get(projectId)?.count;
+    const countLinks = db
+      .prepare<[string], { count: number }>(
+        `SELECT COUNT(*) as count
+         FROM observation_entities oe
+         JOIN observations o ON o.id = oe.observation_id
+         WHERE o.project_id = ?`
+      )
+      .get(projectId)?.count;
+
+    counts = {
+      observations: countObservations ?? 0,
+      entities: countEntities ?? 0,
+      links: countLinks ?? 0,
+    };
+
+    const decisions = db
+      .prepare<[string], Observation>(
+        `SELECT id, project_id, category, title, content, topic_key, status,
+                superseded_by, created_at, updated_at
+         FROM observations
+         WHERE project_id = ? AND category = 'decision' AND status = 'active'
+         ORDER BY topic_key ASC, updated_at DESC, created_at DESC, rowid DESC`
+      )
+      .all(projectId);
+
+    const keyedMap = new Map<string, Observation[]>();
+    for (const decision of decisions) {
+      if (!decision.topic_key) {
+        unkeyed.push(decision);
+        continue;
+      }
+      const group = keyedMap.get(decision.topic_key);
+      if (group) {
+        group.push(decision);
+      } else {
+        keyedMap.set(decision.topic_key, [decision]);
+      }
+    }
+    keyed = [...keyedMap.entries()]
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([topicKey, groupDecisions]) => ({
+        topicKey,
+        decisions: groupDecisions,
+      }));
+
+    const listedDecisionIds = decisions.map((decision) => decision.id);
+    const activityParams: string[] = [projectId];
+    let exclusion = "";
+    if (listedDecisionIds.length > 0) {
+      exclusion = ` AND id NOT IN (${listedDecisionIds.map(() => "?").join(",")})`;
+      activityParams.push(...listedDecisionIds);
+    }
+    activityParams.push(String(SESSION_BRIEF_RECENT_ACTIVITY_LIMIT));
+    recentActivity = db
+      .prepare<string[], Observation>(
+        `SELECT id, project_id, category, title, content, topic_key, status,
+                superseded_by, created_at, updated_at
+         FROM observations
+         WHERE project_id = ?${exclusion}
+         ORDER BY updated_at DESC, created_at DESC, rowid DESC
+         LIMIT ?`
+      )
+      .all(...activityParams);
+
+    if (selectedPaths.length > 0) {
+      const indexed = db
+        .prepare<[string], Entity>(
+          `SELECT id, project_id, entity_type, identifier, file_path
+           FROM entities
+           WHERE project_id = ?
+           ORDER BY file_path ASC, identifier ASC, rowid ASC`
+        )
+        .all(projectId);
+      symbols = indexed.filter((entity) =>
+        entityMatchesSelectedPaths(
+          entity.file_path,
+          selectedPaths,
+          project.rootPath
+        )
+      );
+      if (symbols.length === 0) {
+        notes.push("No indexed symbols matched the selected path(s).");
+      }
+    }
+  } else {
+    notes.push(
+      "No project record was found in the database; project identity was derived from the selected root."
+    );
+    if (selectedPaths.length > 0) {
+      notes.push(
+        "Indexed symbols are unavailable because no project record exists for the selected root."
+      );
+    }
+  }
+
+  const content: SessionBriefContent = {
+    project,
+    activeDecisions: { keyed, unkeyed },
+    recentActivity,
+    symbols,
+    counts,
+    notes,
+    budgetChars,
+  };
+  const rendered = applySessionBriefBudget(
+    buildSessionBriefMarkdown(content),
+    budgetChars
+  );
+  return {
+    ...content,
+    truncated: rendered.truncated,
+    markdown: rendered.markdown,
+  };
+}
+
+function buildUnavailableSessionBrief(
+  rootPath: string,
+  selectedPaths: string[],
+  budgetChars: number,
+  cause: unknown,
+  projectRow?: Project
+): SessionBrief {
+  const project = projectRow
+    ? sessionBriefProjectFromRow(projectRow)
+    : deriveSessionBriefProject(rootPath);
+  const notes = [
+    `Muninn memory is unavailable (${sessionBriefError(cause)}); returning an empty session brief.`,
+  ];
+  if (selectedPaths.length > 0) {
+    notes.push(
+      "Indexed symbols are unavailable because the database could not be read."
+    );
+  }
+  const content: SessionBriefContent = {
+    project,
+    activeDecisions: { keyed: [], unkeyed: [] },
+    recentActivity: [],
+    symbols: [],
+    counts: { observations: null, entities: null, links: null },
+    notes,
+    budgetChars,
+  };
+  const rendered = applySessionBriefBudget(
+    buildSessionBriefMarkdown(content),
+    budgetChars
+  );
+  return {
+    ...content,
+    truncated: rendered.truncated,
+    markdown: rendered.markdown,
+  };
+}
+
+/**
+ * Read-only bootstrap entry point for the CLI and MCP default server.
+ *
+ * It never uses `getDatabase()` or `ensureProject()`: an existing database is
+ * opened read-only, and any missing/inaccessible/corrupt/uninitialized file
+ * yields an empty brief with a cause in `notes` instead of throwing or creating
+ * state.
+ */
+export function readSessionBrief(
+  request: SessionBriefRequest = {}
+): SessionBrief {
+  const rootPath = path.resolve(
+    request.projectRoot ?? findGitRoot() ?? process.cwd()
+  );
+  const budgetChars = resolveSessionBriefBudget(request.budgetChars);
+  const selectedPaths = resolveSessionBriefPaths(request.paths, rootPath);
+
+  if (request.db) {
+    try {
+      const projectRow = findSessionBriefProjectRow(request.db, rootPath);
+      const project = projectRow
+        ? sessionBriefProjectFromRow(projectRow)
+        : deriveSessionBriefProject(rootPath);
+      return assembleSessionBrief(
+        request.db,
+        project,
+        projectRow?.id ?? null,
+        selectedPaths,
+        budgetChars,
+        []
+      );
+    } catch (err) {
+      return buildUnavailableSessionBrief(
+        rootPath,
+        selectedPaths,
+        budgetChars,
+        err
+      );
+    }
+  }
+
+  let db: Database.Database | undefined;
+  try {
+    db = getReadOnlyDatabase(request.dbPath, rootPath);
+  } catch (err) {
+    return buildUnavailableSessionBrief(
+      rootPath,
+      selectedPaths,
+      budgetChars,
+      err
+    );
+  }
+
+  try {
+    const projectRow = findSessionBriefProjectRow(db, rootPath);
+    const project = projectRow
+      ? sessionBriefProjectFromRow(projectRow)
+      : deriveSessionBriefProject(rootPath);
+    return assembleSessionBrief(
+      db,
+      project,
+      projectRow?.id ?? null,
+      selectedPaths,
+      budgetChars,
+      []
+    );
+  } catch (err) {
+    return buildUnavailableSessionBrief(
+      rootPath,
+      selectedPaths,
+      budgetChars,
+      err
+    );
+  } finally {
+    if (db.open) {
+      db.close();
+    }
+  }
 }
 
 export class MemoryService implements IMemoryService {
@@ -977,6 +1565,38 @@ export class MemoryService implements IMemoryService {
       },
       observations,
     };
+  }
+
+  /**
+   * Builds the bounded, deterministic session brief from the already-initialized
+   * service database. This method itself only reads; the standalone
+   * {@link readSessionBrief} entry point is the one that opens a database
+   * read-only and fails open when it is missing or unusable.
+   */
+  public getSessionBrief(options?: SessionBriefOptions): SessionBrief {
+    const budgetChars = resolveSessionBriefBudget(options?.budgetChars);
+    const selectedPaths = resolveSessionBriefPaths(
+      options?.paths,
+      this._currentProject.root_path
+    );
+    try {
+      return assembleSessionBrief(
+        this._db,
+        sessionBriefProjectFromRow(this._currentProject),
+        this._currentProject.id,
+        selectedPaths,
+        budgetChars,
+        []
+      );
+    } catch (err) {
+      return buildUnavailableSessionBrief(
+        this._currentProject.root_path,
+        selectedPaths,
+        budgetChars,
+        err,
+        this._currentProject
+      );
+    }
   }
 
   /**

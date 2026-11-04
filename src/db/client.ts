@@ -344,6 +344,53 @@ export function getDatabase(dbPath?: string, startDir?: string): Database.Databa
 }
 
 /**
+ * Opens an **existing** Muninn database without any initialization side effects.
+ *
+ * This is the access path for read-only bootstrap: it resolves the same default
+ * location as {@link getDatabase}, but never creates a directory or file, never
+ * applies write-capable pragmas, never runs schema DDL/migrations and never
+ * inserts a project row. Opening a missing, inaccessible or corrupt file fails
+ * with the underlying SQLite error; callers that must fail open catch it and
+ * return an empty session brief with a note.
+ */
+export function getReadOnlyDatabase(
+  dbPath?: string,
+  startDir?: string
+): Database.Database {
+  const resolvedPath = resolveDatabasePath(dbPath, startDir);
+  if (resolvedPath === ":memory:") {
+    throw new Error(
+      "A read-only session brief requires an existing database file, not :memory:."
+    );
+  }
+
+  // Bootstrap must not follow a repository-shipped symlink either. The screen
+  // does not write anything; a refused path simply becomes an unavailable brief.
+  assertDocPath(resolvedPath, {
+    projectPath: findGitRoot(startDir ?? process.cwd()) ?? undefined,
+    label: "the Muninn database",
+    action: "read",
+  });
+
+  const db = new Database(resolvedPath, {
+    readonly: true,
+    fileMustExist: true,
+    timeout: 5000,
+  });
+  try {
+    // A connection-local pragma only; it does not write to the database file.
+    db.pragma("busy_timeout = 5000");
+  } catch (err) {
+    db.close();
+    throw err;
+  }
+  return db;
+}
+
+/** Alias kept explicit for callers that prefer the `open…` naming convention. */
+export const openReadOnlyDatabase = getReadOnlyDatabase;
+
+/**
  * Finds an existing project by root_path or creates a new project record idempotently.
  */
 export function ensureProject(

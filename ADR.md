@@ -1,8 +1,9 @@
 # Architecture Decision Records
 
-Decisions are listed in recording order. `ADR-1` is implemented in the current codebase;
-`ADR-2` and `ADR-3` are proposals that are not implemented yet. `ADR-4`–`ADR-10` were recorded
+Decisions are listed in recording order. `ADR-1` and `ADR-2` are implemented in the current
+codebase. `ADR-3` is still a proposal that is not implemented yet. `ADR-4`–`ADR-10` were recorded
 retroactively from the 0.1.0 codebase so the existing architecture has an explicit history.
+`ADR-11` records a correction to the dependency relation set described in `ADR-6`.
 
 ## ADR-1: Track decision supersession in observation rows
 
@@ -27,7 +28,7 @@ retroactively from the 0.1.0 codebase so the existing architecture has an explic
 ## ADR-2: Provide bootstrap through a read-only, bounded brief
 
 - **Date**: 2026-11-04
-- **Status**: Proposed (not implemented in this codebase)
+- **Status**: Accepted and implemented
 - **Context**: Agents need a session-start view of project identity, active decisions, recent
   activity, indexed symbols, and counts. Constructing the existing `MemoryService` may initialize a
   database and project record, which is unsuitable for a read-only bootstrap that must fail open.
@@ -38,12 +39,12 @@ retroactively from the 0.1.0 codebase so the existing architecture has an explic
   missing or unusable, it returns an empty brief with an explanatory note. The rendered brief has a
   configurable character budget and deterministic ordering. Path-based symbol selection uses only
   indexed entities within the project boundary.
-- **Consequences**: Agents can bootstrap without creating project state, and MCP and CLI would share
-  one output contract. The implementation must distinguish read-only access from normal service
-  initialization and enforce the character budget over the complete rendered Markdown. Missing data
-  is reported rather than synthesized; the brief may contain less information when the database has
-  not been initialized or indexed. **No implementation exists yet**: there is no `getSessionBrief`,
-  `muninn_bootstrap`, or `muninn memory brief` in the current source tree.
+- **Consequences**: Agents can bootstrap without creating project state, and MCP and CLI share one
+  output contract. The implementation distinguishes `getReadOnlyDatabase` from normal service
+  initialization and enforces the character budget over the complete rendered Markdown. Missing data
+  is reported rather than synthesized; the brief contains less information when the database has not
+  been initialized or indexed. Implemented by `MemoryService.getSessionBrief`, the standalone
+  `readSessionBrief`, the `muninn_bootstrap` MCP tool, and `muninn memory brief`.
 
 ## ADR-3: Reuse the stored dependency graph for neighbor recovery
 
@@ -172,3 +173,20 @@ retroactively from the 0.1.0 codebase so the existing architecture has an explic
   validator. Clients can use either casing for supported aliases and omitted null fields are tolerated.
   CamelCase and snake_case fields must be kept in sync inside each schema, and normalization is a
   deliberate allowlist rather than a general case converter.
+
+## ADR-11: Emit only dependency relations the AST extractor implements
+
+- **Date**: 2026-11-04
+- **Status**: Accepted
+- **Context**: ADR-6 described persisting `imports`, `calls`, `extends`, `implements`, and
+  `references`, and the database schema allows all five values. The current AST extractor in
+  `src/indexer/ast-indexer.ts` only produces `imports`, `extends`, `implements`, and `references`;
+  there is no call-expression extraction. Documentation that advertised call edges described an
+  intended relation set rather than the behavior users receive.
+- **Decision**: Keep `calls` as a valid `entity_dependencies.relation_type` for forward compatibility,
+  but state that the current indexer emits only the four implemented relation types. Do not infer call
+  edges from names, imports, or runtime behavior.
+- **Consequences**: Symbol inspection reflects only stored edges, and briefs select indexed symbols;
+  no call graph is available in 0.1.0. Adding call extraction requires a new implementation and tests,
+  and documentation must not claim the edge exists until it does. Existing databases with `calls` rows
+  remain valid and readable.

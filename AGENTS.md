@@ -49,6 +49,8 @@ that are specified but not implemented.
 - Database migrations must be idempotent and preserve existing rows, indexes, FTS triggers, and data.
 - Observation creation and decision supersession happen in one SQLite transaction.
 - Default `search` and `getContext` exclude superseded observations; `includeSuperseded` opts in.
+- Session bootstrap uses `getReadOnlyDatabase` / `readSessionBrief`: it must not create directories or
+  files, run schema DDL/migrations, or insert a project row, and must fail open with a note.
 - Every MCP input is validated with Zod after `normalizeArgs`; keep camelCase and snake_case aliases
   consistent.
 - Protected database and JSONL paths go through `assertDocPath`; do not bypass symlink or containment

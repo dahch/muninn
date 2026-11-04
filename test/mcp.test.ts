@@ -86,7 +86,7 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
       const response = await client.listTools();
       expect(response).toBeDefined();
       expect(response.tools).toBeInstanceOf(Array);
-      expect(response.tools).toHaveLength(7);
+      expect(response.tools).toHaveLength(8);
 
       const toolNames = response.tools.map((t) => t.name);
       expect(toolNames).toContain("muninn_save");
@@ -96,6 +96,7 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
       expect(toolNames).toContain("muninn_stats");
       expect(toolNames).toContain("muninn_inspect_symbol");
       expect(toolNames).toContain("muninn_verify_contract");
+      expect(toolNames).toContain("muninn_bootstrap");
 
       // Verify static exports match
       expect(TOOL_NAMES).toEqual([
@@ -106,8 +107,9 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
         "muninn_stats",
         "muninn_inspect_symbol",
         "muninn_verify_contract",
+        "muninn_bootstrap",
       ]);
-      expect(MUNINN_TOOLS).toHaveLength(7);
+      expect(MUNINN_TOOLS).toHaveLength(8);
     });
 
     it("verifies tool schemas have valid property structures and descriptions", async () => {
@@ -1452,6 +1454,25 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
       }
     });
 
+    it("materializes the lazy service only on access and closes it through the handle", async () => {
+      const connectSpy = vi
+        .spyOn(StdioServerTransport.prototype, "start")
+        .mockImplementation(async () => {});
+
+      try {
+        const res = await startMcpServer({ dbPath: ":memory:" });
+        const service = res.service;
+        expect(service).toBeInstanceOf(MemoryService);
+        expect(service.db.open).toBe(true);
+
+        res.closeService();
+        expect(service.db.open).toBe(false);
+        await res.server.close();
+      } finally {
+        connectSpy.mockRestore();
+      }
+    });
+
     it("starts server with default options when called without parameters", async () => {
       const connectSpy = vi
         .spyOn(StdioServerTransport.prototype, "start")
@@ -1540,6 +1561,7 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
         linkSymbol: vi.fn(),
         inspectSymbol: vi.fn().mockReturnValue(null),
         getStats: vi.fn().mockReturnValue({ projects: 1, observations: 0, entities: 0, links: 0 }),
+        getSessionBrief: vi.fn(),
         syncToDisk: vi.fn(),
         importFromDisk: vi.fn(),
         close: vi.fn(),
@@ -1562,6 +1584,7 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
         "muninn_link_symbol",
         "muninn_stats",
         "muninn_inspect_symbol",
+        "muninn_bootstrap",
         "muninn_verify_contract",
       ]);
 

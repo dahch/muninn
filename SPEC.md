@@ -3,14 +3,14 @@
 Muninn is a standalone, local-first memory engine for coding agents and developers. It stores
 project observations in SQLite, searches them with FTS5/BM25, indexes TypeScript and JavaScript
 symbols and their dependencies, and exposes memory operations through a library, CLI, and MCP
-server. The current codebase adds explicit decision supersession with lifecycle-aware retrieval. The
-project is independent of Huginn and can be embedded by any compatible client.
+server. The current codebase adds explicit decision supersession with lifecycle-aware retrieval and a
+read-only session-bootstrap brief shared by the library, MCP, and CLI. The project is independent of
+Huginn and can be embedded by any compatible client.
 
-> **Implementation status (current codebase):** session briefs/read-only bootstrap and dependency-neighbor
-> recovery are recorded as proposed decisions in ADR-2 and ADR-3, but no code for them exists in
-> this repository. There is no `getSessionBrief`, `neighbors`, `muninn_bootstrap`, or
-> `muninn memory brief` implementation. They are listed under [Planned, not implemented](#planned-not-implemented)
-> rather than functional requirements.
+> **Implementation status (current codebase):** session briefs/read-only bootstrap (ADR-2) are
+> implemented through `MemoryService.getSessionBrief`, `readSessionBrief`, `muninn_bootstrap`, and
+> `muninn memory brief`. Dependency-neighbor recovery (ADR-3) remains proposed and is listed under
+> [Planned, not implemented](#planned-not-implemented).
 
 ## Goals
 
@@ -27,8 +27,7 @@ project is independent of Huginn and can be embedded by any compatible client.
 - Generating summaries or other content with a model.
 - Adding embeddings, vector search, network services, dependencies, or database tables.
 - Inferring decisions, symbols, dependencies, or other facts not stored in Muninn.
-- Session briefs, read-only bootstrap, and graph-neighbor traversal in this release (see the
-  proposed ADRs).
+- Graph-neighbor traversal in this release (see the proposed ADR-3).
 
 ## Users and personas
 
@@ -125,6 +124,36 @@ argument normalization pattern. Existing tool names and required arguments shall
 - Invalid inputs produce the existing structured tool error response without terminating the MCP
   server.
 
+### Session bootstrap (ADR-2)
+
+**REQ-19 — Provide a typed, bounded session brief.** Muninn shall expose
+`MemoryService.getSessionBrief({ paths?, budgetChars? })` and a standalone read-only
+`readSessionBrief` entry point. The brief shall contain project identity, active decisions, recent
+activity, path-selected indexed symbols, counts, and explanatory notes, omitting empty sections rather
+than fabricating data.
+
+**AC-19**
+- Active decisions are grouped by stored topic key; unkeyed decisions are listed separately and
+  multiple active decisions with the same key are not collapsed.
+- Recent activity excludes active decisions already listed, labels superseded observations, and
+  counts all observations including superseded ones.
+- Missing, inaccessible, corrupt, or uninitialized databases produce an empty brief with a cause in
+  `notes` and unavailable (`null`) counts without throwing or creating database state.
+
+**REQ-20 — Select indexed symbols by bounded project paths.** A brief shall accept at most 20 file or
+directory paths, resolve them relative to the project root, normalize separators, reject paths outside
+the project, and match only existing indexed `entities.file_path` values without scanning the
+repository.
+
+**REQ-21 — Render deterministic Markdown within a character budget.** The shared renderer shall
+produce deterministic output and enforce a positive integer `budgetChars` (default 8,000, maximum
+20,000) over the complete Markdown, including headings, notes, and a visible truncation marker.
+
+**REQ-22 — Provide MCP and CLI bootstrap surfaces with shared output.** `muninn_bootstrap` (with Zod
+validation and camelCase/snake_case aliases) and `muninn memory brief [--project <path>] [--paths a,b]
+[--budget <n>]` shall return the service renderer output. Default MCP servers shall not initialize a
+writable database merely to serve bootstrap.
+
 ### Search, symbols, synchronization, and statistics
 
 **REQ-7 — Preserve FTS5/BM25 search and recent context.** Search shall continue to use SQLite FTS5
@@ -139,7 +168,8 @@ Both shall preserve project/category/topic filtering, all-project options, and b
 
 **REQ-8 — Preserve symbol indexing, inspection, and linking.** The TypeScript Compiler API indexer
 shall continue to index supported TypeScript/JavaScript source files, including file and symbol
-entities and `imports`, `calls`, `extends`, `implements`, and `references` dependencies.
+entities and `imports`, `extends`, `implements`, and `references` dependencies. The schema permits a
+`calls` relation, but the current indexer does not extract call edges.
 Observation-symbol linking and symbol inspection shall remain available.
 
 **AC-8**
@@ -165,14 +195,15 @@ importable after the schema migration.
 
 ### MCP, CLI, and contract verification
 
-**REQ-10 — Preserve the MCP server contract.** Keep the existing `muninn_save`, `muninn_search`,
+**REQ-10 — Preserve the MCP server contract.** Keep the pre-existing `muninn_save`, `muninn_search`,
 `muninn_context`, `muninn_link_symbol`, `muninn_stats`, `muninn_inspect_symbol`, and
-`muninn_verify_contract` tools and their established required arguments. Retain Zod validation,
-snake_case aliases where supported, safe argument normalization, structured errors, and bounded
-stdio transport behavior.
+`muninn_verify_contract` tools and their established required arguments, alongside the
+`muninn_bootstrap` tool added by REQ-22. Retain Zod validation, snake_case aliases where supported,
+safe argument normalization, structured errors, and bounded stdio transport behavior.
 
 **AC-10**
-- All seven existing tools remain registered and callable.
+- All eight registered tools remain callable, and the seven pre-existing tool contracts remain
+  compatible.
 - Existing calls remain compatible unless using an invalid input.
 - Invalid arguments and handler errors return tool errors without crashing the server.
 - MCP protocol traffic remains on stdout; diagnostics do not corrupt it.
@@ -236,8 +267,7 @@ still counted, exported, inspected, and returned when explicitly requested.
 
 - Existing MCP tool names and required inputs remain compatible; additions to existing tools are
   optional parameters.
-- Maintain TypeScript strictness, ESM, `.js` extensions for relative imports, and no `any` in
-  application code.
+- Maintain TypeScript strictness, ESM, and `.js` extensions for relative imports.
 - Make no database schema changes beyond `status` and `superseded_by`; create no tables.
 - Keep the duplicated schema definitions synchronized.
 - Update `README.md`, `DESIGN.md`, and `CHANGELOG.md` in the same change as each implementation increment.
@@ -247,9 +277,6 @@ still counted, exported, inspected, and returned when explicitly requested.
 The following were specified but are **not present** in the 0.1.0 codebase. Do not plan integrations
 around them without first implementing and testing them.
 
-- **Session brief / read-only bootstrap (ADR-2).** A typed `getSessionBrief` with project identity,
-  active decisions, activity, indexed symbols, counts, notes, and a Markdown renderer; an MCP
-  `muninn_bootstrap` tool; and `muninn memory brief`.
 - **Dependency-neighbor recovery (ADR-3).** A bounded `MemoryService.neighbors` traversal over
   `entity_dependencies`, graph expansion in briefs, and a neighbors field in `muninn_inspect_symbol`.
 

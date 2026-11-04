@@ -89,11 +89,12 @@ Usage:
   muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>]
   muninn memory sync [--import] [--file <path>] [--project <path>]
   muninn memory index [files...] [--project <path>] [--db <path>]
+  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
   muninn check [files...] [--project <path>]
   muninn mcp run [--db <path>] [--project <path>]
 
 Commands:
-  memory  query and manage the persistent codebase memory (init, search, sync, index)
+  memory  query and manage the persistent codebase memory (init, search, sync, index, brief)
   mcp     start the Muninn MCP server for agent memory integration (run)
   check   verify TypeScript execution contracts and pre-emit diagnostics
 

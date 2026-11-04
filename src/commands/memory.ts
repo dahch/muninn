@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import chalk from "chalk";
-import { MemoryService } from "../service/memory-service.js";
+import {
+  MemoryService,
+  MAX_SESSION_BRIEF_BUDGET,
+  MAX_SESSION_BRIEF_PATHS,
+  readSessionBrief,
+} from "../service/memory-service.js";
 import { startMcpServer } from "../mcp/server.js";
 import { indexFilesIntoMuninn } from "../indexer/ast-indexer.js";
 import { sanitizeTerminalText } from "../util/text.js";
@@ -61,12 +66,14 @@ Usage:
   muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>]
   muninn memory sync [--import] [--file <path>] [--project <path>]
   muninn memory index [files...] [--project <path>] [--db <path>]
+  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
 
 Subcommands:
   init     Initialize SQLite database and verify schema
   search   Search observations with BM25 relevance ranking
   sync     Export observations to disk (.jsonl) or import with --import
   index    Index AST symbols and dependencies into Muninn memory
+  brief    Print a bounded read-only session brief (Markdown)
 `);
 }
 
@@ -216,6 +223,65 @@ export async function handleMemoryCommand(
     return;
   }
 
+  if (subcommand === "brief") {
+    const rawPaths =
+      typeof args["--paths"] === "string" ? args["--paths"] : undefined;
+    const paths =
+      rawPaths === undefined
+        ? undefined
+        : rawPaths
+            .split(",")
+            .map((p) => p.trim())
+            .filter(Boolean);
+
+    if (paths && paths.length > MAX_SESSION_BRIEF_PATHS) {
+      console.error(
+        chalk.red(
+          `Error: At most ${MAX_SESSION_BRIEF_PATHS} paths may be requested.`
+        )
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    let budgetChars: number | undefined;
+    if (typeof args["--budget"] === "string") {
+      const parsedBudget = Number(args["--budget"]);
+      if (
+        !Number.isInteger(parsedBudget) ||
+        parsedBudget <= 0 ||
+        parsedBudget > MAX_SESSION_BRIEF_BUDGET
+      ) {
+        console.error(
+          chalk.red(
+            `Error: --budget must be a positive integer no greater than ${MAX_SESSION_BRIEF_BUDGET}.`
+          )
+        );
+        process.exitCode = 1;
+        return;
+      }
+      budgetChars = parsedBudget;
+    }
+
+    try {
+      const brief = readSessionBrief({
+        dbPath,
+        projectRoot,
+        paths,
+        budgetChars,
+      });
+      console.log(brief.markdown);
+    } catch (err: unknown) {
+      console.error(
+        chalk.red(
+          `Error: ${err instanceof Error ? err.message : String(err)}`
+        )
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (subcommand === "index") {
     const rawFiles =
       positionals && positionals.length > 0
@@ -326,10 +392,11 @@ export async function handleMcpCommand(
   }
 
   if (subcommand === "run") {
-    const { server, transport, service } = await startMcpServer({
+    const started = await startMcpServer({
       dbPath,
       projectRoot,
     });
+    const { server, transport } = started;
     try {
       // Protocol failures were previously discarded (AC-30.3): surface them on
       // stderr (never stdout — that stream carries JSON-RPC) without aborting.
@@ -373,7 +440,12 @@ export async function handleMcpCommand(
         process.on("SIGTERM", done);
       });
     } finally {
-      service?.close?.();
+      if (typeof started.closeService === "function") {
+        started.closeService();
+      } else {
+        // Compatibility with injected test doubles that predate the lazy handle.
+        started.service?.close?.();
+      }
       await server?.close?.();
     }
     return;

@@ -17,11 +17,17 @@ package with no dependency on the orchestrator.
 - **Decision supersession** — saving a decision with `supersedesTopicKey` atomically marks the
   project's active decisions with that topic key as `superseded`, linking each to its replacement.
   Search and context hide superseded observations by default; pass `includeSuperseded` to see them.
+- **Read-only session brief** — the library, MCP `muninn_bootstrap` tool, and
+  `muninn memory brief` render the same deterministic Markdown view of project identity, active
+  decisions, recent activity, path-selected indexed symbols, and counts. Bootstrap reads an existing
+  database without DDL or project insertion and fails open when memory is missing or unusable.
 - **A symbol graph** — the TypeScript Compiler API extracts files, functions, classes,
-  interfaces and modules from your sources, plus the `imports`/`calls`/`extends`/`implements`/
-  `references` edges between them, and links observations to symbols.
+  interfaces and modules from your sources, plus the `imports`/`extends`/`implements`/
+  `references` edges between them, and links observations to symbols. The schema also reserves a
+  `calls` relation, but the current indexer does not emit call edges.
 - **MCP tools** for agents: `muninn_context`, `muninn_save`, `muninn_search`,
-  `muninn_link_symbol`, `muninn_inspect_symbol`, `muninn_verify_contract`, `muninn_stats`.
+  `muninn_link_symbol`, `muninn_inspect_symbol`, `muninn_verify_contract`, `muninn_stats`,
+  `muninn_bootstrap`.
 - **Contract verification** — the same TypeScript execution-contract check as a CLI command
   (`muninn check`) and as the `muninn_verify_contract` MCP tool.
 - **JSONL sync** — export/import the whole memory as portable line-delimited JSON.
@@ -57,6 +63,7 @@ muninn memory init   [--db <path>] [--project <path>]
 muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>]
 muninn memory sync   [--import] [--file <path>] [--project <path>]
 muninn memory index  [files...] [--project <path>] [--db <path>]
+muninn memory brief  [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
 
 muninn check [files...] [--project <path>]
 
@@ -67,6 +74,12 @@ The database resolves to `<git-root>/.huginn/muninn.db` inside a repository and 
 `~/.huginn/muninn.db` outside one. `--db` overrides it; `:memory:` is accepted for tests.
 Both the database file and the project record are resolved from the **same** root, so
 `--project X` can never write into another project's database.
+
+`muninn memory brief` is read-only. `--paths` accepts up to 20 comma-separated files or directories
+(relative to the project root, or absolute inside it) and selects only indexed symbols. `--budget`
+limits the complete Markdown output to a positive integer no greater than 20,000 characters; the
+default is 8,000. A missing, inaccessible, or corrupt database yields an empty brief with an
+explanatory note instead of being created or repaired.
 
 ## MCP
 
@@ -95,6 +108,10 @@ The `muninn_save` tool accepts `supersedesTopicKey` / `supersedes_topic_key`, an
 `muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`. Existing
 calls keep working: replacement is opt-in and retrieval excludes superseded observations by
 default.
+
+`muninn_bootstrap` optionally accepts `paths` (at most 20) and `budgetChars` / `budget_chars`
+(default 8,000, maximum 20,000). It returns the shared service-rendered Markdown directly, not a
+JSON wrapper, and does not create or initialize a database when called on a default server.
 
 ## Architecture
 
@@ -154,7 +171,24 @@ for (const hit of memory.search({ query: "token validation", limit: 5 })) {
   console.log(hit.category, hit.title, hit.rank);
 }
 
+// The same bounded Markdown used by the MCP tool and CLI.
+const brief = memory.getSessionBrief({ paths: ["src/auth"], budgetChars: 8000 });
+console.log(brief.markdown);
+
 memory.close();
+```
+
+For bootstrap without initializing anything, use the standalone read-only entry point:
+
+```ts
+import { readSessionBrief } from "@dahch/muninn";
+
+const brief = readSessionBrief({
+  projectRoot: process.cwd(),
+  paths: ["src/service"],
+  budgetChars: 8000,
+});
+console.log(brief.markdown);
 ```
 
 Subpath entry points are available for narrower imports:
@@ -163,7 +197,7 @@ Subpath entry points are available for narrower imports:
 |---|---|
 | `@dahch/muninn` | everything below |
 | `@dahch/muninn/db` | SQLite client, schema, path resolution, project records |
-| `@dahch/muninn/service` | `MemoryService` (save, search, context, linking, sync, stats) |
+| `@dahch/muninn/service` | `MemoryService` (save, search, context, linking, sync, stats, session brief) |
 | `@dahch/muninn/indexer` | AST symbol/dependency extraction and indexing |
 | `@dahch/muninn/mcp` | MCP server, tool registry, bounded stdio transport |
 | `@dahch/muninn/contracts` | TypeScript contract verification |
@@ -181,6 +215,8 @@ Muninn has no required environment variables. Configuration is passed as CLI fla
 
 ## Security notes
 
+- Session bootstrap opens an existing database read-only. It never creates a directory or file, runs
+  DDL/migrations, or inserts a project row; path selections are confined to the project root.
 - Every path Muninn writes to — the SQLite file and the JSONL export — is screened: a symlink on
   the final component is refused, and a project-relative path must resolve inside the project, so
   a repository cannot redirect the write outside itself (the `src/util/path-safety.ts` rule, with
@@ -193,7 +229,7 @@ Muninn has no required environment variables. Configuration is passed as CLI fla
 ```sh
 npm run dev        # run src/cli.ts directly with Bun
 npm run build      # tsc -> dist/ (+ schema.sql, +x cli.js)
-npm test           # vitest run (storage, service, indexer, MCP, CLI)
+npm test           # vitest run (storage, service, session brief, indexer, MCP, CLI, contracts)
 npm run test:watch # vitest in watch mode
 npm run typecheck  # tsc --noEmit
 npm run prepublishOnly  # build + test + typecheck (npm lifecycle hook)
@@ -228,14 +264,14 @@ section from [`CHANGELOG.md`](./CHANGELOG.md).
 ```text
 src/
   cli.ts                 argument parsing, command routing, process entry point
-  commands/              memory (init/search/sync/index), mcp run, check
+  commands/              memory (init/search/sync/index/brief), mcp run, check
   db/                    SQLite client, schema.sql, path and project resolution
-  service/               MemoryService: save, search, context, links, sync, stats
+  service/               MemoryService: save, search, context, links, sync, stats, session brief
   indexer/               TypeScript/JavaScript AST symbol and dependency extraction
   mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
   contracts/             in-process TypeScript contract verification
   util/                  terminal-text sanitizer and path-safety helpers
-test/                    Vitest integration suites for db, service, indexer, MCP, CLI, contracts
+test/                    Vitest integration suites for db, service, session brief, indexer, MCP, CLI, contracts
 ```
 
 ## Documentation

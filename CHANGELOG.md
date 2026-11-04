@@ -12,6 +12,16 @@
   `false`) and expose `status` / `superseded_by` in their results.
 - MCP compatibility: `muninn_save` accepts `supersedesTopicKey` / `supersedes_topic_key`, and
   `muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`.
+- Read-only session bootstrap: `MemoryService.getSessionBrief` and the standalone
+  `readSessionBrief` render a deterministic, budgeted Markdown brief with project identity, active
+  decisions grouped by topic key, unkeyed decisions, recent activity with superseded labels,
+  path-selected indexed symbols, counts, and explanatory notes. It opens only existing databases
+  read-only (with the same symlink/containment screen as the write path) and fails open with
+  unavailable counts when memory is missing, inaccessible, corrupt, or uninitialized.
+- MCP `muninn_bootstrap` and CLI `muninn memory brief [--paths a,b] [--budget <n>]`, both returning
+  the same renderer output. Bootstrap accepts up to 20 in-project paths and budgets from 1 to 20,000
+  characters (default 8,000); default MCP servers defer writable database initialization until a
+  non-bootstrap tool is used.
 
 ## 0.1.0
 

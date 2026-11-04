@@ -13,6 +13,8 @@ import { sanitizeTerminalText } from "../util/text.js";
 import {
   MemoryService,
   VALID_CATEGORIES,
+  MAX_SESSION_BRIEF_BUDGET,
+  readSessionBrief,
   type IMemoryService,
   type MemoryServiceOptions,
   type ObservationWithEntities,
@@ -225,6 +227,41 @@ export type MuninnInspectSymbolInput = z.infer<
 >;
 
 /**
+ * Zod schema for muninn_bootstrap tool arguments.
+ */
+export const MuninnBootstrapSchema = z.object({
+  paths: z
+    .array(z.string().trim().min(1, "Path cannot be empty").max(4096))
+    .max(20, "At most 20 paths may be requested")
+    .nullish()
+    .describe(
+      "Optional file or directory paths, relative to the project root or absolute inside it, used to select indexed symbols"
+    ),
+  budgetChars: z
+    .number()
+    .int("budgetChars must be an integer")
+    .positive("budgetChars must be positive")
+    .max(
+      MAX_SESSION_BRIEF_BUDGET,
+      `budgetChars cannot exceed ${MAX_SESSION_BRIEF_BUDGET}`
+    )
+    .nullish()
+    .describe("Maximum rendered Markdown length (default 8000, max 20000)"),
+  budget_chars: z
+    .number()
+    .int("budget_chars must be an integer")
+    .positive("budget_chars must be positive")
+    .max(
+      MAX_SESSION_BRIEF_BUDGET,
+      `budget_chars cannot exceed ${MAX_SESSION_BRIEF_BUDGET}`
+    )
+    .nullish()
+    .describe("Maximum rendered Markdown length (default 8000, max 20000, snake_case)"),
+});
+
+export type MuninnBootstrapInput = z.infer<typeof MuninnBootstrapSchema>;
+
+/**
  * Zod schema for muninn_verify_contract tool arguments.
  */
 export const MuninnVerifyContractSchema = z.object({
@@ -345,6 +382,17 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
       };
     },
   },
+  muninn_bootstrap: {
+    name: "muninn_bootstrap",
+    description:
+      "Build a bounded, deterministic read-only session brief with project identity, active decisions, recent activity, path-selected indexed symbols, counts, and notes.",
+    schema: MuninnBootstrapSchema,
+    handler: (service, input) =>
+      service.getSessionBrief({
+        paths: input.paths ?? undefined,
+        budgetChars: input.budgetChars ?? input.budget_chars,
+      }).markdown,
+  },
   muninn_verify_contract: {
     name: "muninn_verify_contract",
     description:
@@ -393,6 +441,7 @@ export const TOOL_NAMES = [
   "muninn_stats",
   "muninn_inspect_symbol",
   "muninn_verify_contract",
+  "muninn_bootstrap",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -464,6 +513,12 @@ export function normalizeArgs(
   if (normalized.file !== undefined && normalized.files === undefined) {
     normalized.files = normalized.file;
   }
+  if (
+    normalized.budget_chars !== undefined &&
+    normalized.budgetChars === undefined
+  ) {
+    normalized.budgetChars = normalized.budget_chars;
+  }
   return normalized;
 }
 
@@ -484,7 +539,16 @@ export function isMemoryService(obj: unknown): obj is IMemoryService {
 export type MuninnServer = Server & {
   service: IMemoryService;
   memoryService: IMemoryService;
+  getService(): IMemoryService;
+  closeService(force?: boolean): void;
 };
+
+export interface McpServerHandle {
+  server: MuninnServer;
+  transport: BoundedStdioServerTransport;
+  readonly service: IMemoryService;
+  closeService(force?: boolean): void;
+}
 
 /**
  * Deadline for a single JSON-RPC write (AC-30.3 / ADR-30.3). The SDK transport
@@ -590,9 +654,25 @@ export class BoundedStdioServerTransport extends StdioServerTransport {
 export function createMcpServer(
   serviceOrOptions?: IMemoryService | MemoryServiceOptions
 ): MuninnServer {
-  const service: IMemoryService = isMemoryService(serviceOrOptions)
+  const injectedService = isMemoryService(serviceOrOptions)
     ? serviceOrOptions
-    : new MemoryService(serviceOrOptions);
+    : undefined;
+  const options = injectedService
+    ? undefined
+    : (serviceOrOptions as MemoryServiceOptions | undefined);
+
+  let serviceInstance: IMemoryService | undefined = injectedService;
+  const getService = (): IMemoryService => {
+    if (!serviceInstance) {
+      serviceInstance = new MemoryService(options);
+    }
+    return serviceInstance;
+  };
+  const closeService = (force = true): void => {
+    if (serviceInstance) {
+      serviceInstance.close?.(force);
+    }
+  };
 
   const server = new Server(
     {
@@ -606,11 +686,22 @@ export function createMcpServer(
     }
   );
 
-  // Store service reference on server instance with typed properties
-  const mcpServer = Object.assign(server, {
-    service,
-    memoryService: service,
-  }) as MuninnServer;
+  // The writable service is lazy for a default server: bootstrap must be able to
+  // run without creating or initializing a database. Accessing `service` (or
+  // calling any non-bootstrap tool) initializes it exactly as before.
+  const mcpServer = server as MuninnServer;
+  Object.defineProperty(mcpServer, "service", {
+    configurable: true,
+    enumerable: true,
+    get: getService,
+  });
+  Object.defineProperty(mcpServer, "memoryService", {
+    configurable: true,
+    enumerable: true,
+    get: getService,
+  });
+  mcpServer.getService = getService;
+  mcpServer.closeService = closeService;
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
@@ -650,12 +741,32 @@ export function createMcpServer(
         };
       }
 
-      const result = await tool.handler(service, parsed.data);
+      const isBootstrap = name === "muninn_bootstrap";
+      if (isBootstrap && !injectedService) {
+        const input = parsed.data as MuninnBootstrapInput;
+        const brief = readSessionBrief({
+          dbPath: options?.dbPath,
+          projectRoot: options?.projectRoot,
+          db: options?.db,
+          paths: input.paths ?? undefined,
+          budgetChars: input.budgetChars ?? input.budget_chars ?? undefined,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: brief.markdown,
+            },
+          ],
+        };
+      }
+
+      const result = await tool.handler(getService(), parsed.data);
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2),
+            text: isBootstrap ? String(result) : JSON.stringify(result, null, 2),
           },
         ],
       };
@@ -681,16 +792,25 @@ export function createMcpServer(
 export async function startMcpServer(
   options?: MemoryServiceOptions | IMemoryService,
   transportOptions?: BoundedStdioTransportOptions,
-): Promise<{
-  server: MuninnServer;
-  transport: BoundedStdioServerTransport;
-  service: IMemoryService;
-}> {
-  const service: IMemoryService = isMemoryService(options)
-    ? options
-    : new MemoryService(options);
-  const server = createMcpServer(service);
-  const transport = new BoundedStdioServerTransport(process.stdin, process.stdout, transportOptions);
+): Promise<McpServerHandle> {
+  const server = createMcpServer(options);
+  const transport = new BoundedStdioServerTransport(
+    process.stdin,
+    process.stdout,
+    transportOptions,
+  );
   await server.connect(transport);
-  return { server, transport, service };
+
+  const handle = { server, transport } as McpServerHandle;
+  Object.defineProperty(handle, "service", {
+    configurable: true,
+    enumerable: true,
+    get: () => server.getService(),
+  });
+  Object.defineProperty(handle, "closeService", {
+    configurable: false,
+    enumerable: false,
+    value: (force = true) => server.closeService(force),
+  });
+  return handle;
 }

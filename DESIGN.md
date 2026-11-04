@@ -80,6 +80,16 @@ If pragma initialization or DDL execution throws an exception, `getDatabase` imm
 
 After the DDL runs, `getDatabase` inspects `PRAGMA table_info(observations)` and adds only the missing lifecycle columns with `ALTER TABLE` (`status` defaulting to `active`, and nullable `superseded_by`). The migration is idempotent and never recreates tables or changes the existing FTS triggers.
 
+### Read-Only Access for Session Bootstrap
+
+`getReadOnlyDatabase(dbPath?, startDir?)` is a separate opener for bootstrap. It resolves the same
+default path as `getDatabase` but screens it with the same `assertDocPath` symlink/containment rule
+and opens the file with SQLite `readonly` + `fileMustExist` options.
+It never creates a directory or database file, never runs schema DDL or migrations, and never inserts
+a project record. Missing, inaccessible, corrupt, or uninitialized databases therefore fail at open or
+query time; `readSessionBrief` catches that failure and returns an empty brief with an explanatory
+note. Normal `MemoryService` construction still uses `getDatabase` + `ensureProject` unchanged.
+
 ### Schema & Entity-Relationship Design
 
 The database DDL is defined in `src/db/schema.sql` and mirrored in `src/db/client.ts` (`SCHEMA_SQL` fallback):
@@ -175,7 +185,7 @@ erDiagram
    - Index: `idx_observation_entities_entity_id ON observation_entities(entity_id)`.
 
 6. **`entity_dependencies`**:
-   - Represents topological dependency and structural relationships between code entities (e.g. imports, function/method calls, interface implementations, class extensions, file-to-symbol references).
+   - Represents topological dependency and structural relationships between code entities (e.g. imports, interface implementations, class/interface extensions, file-to-symbol references). The schema accepts a `calls` value, but the current indexer does not emit call edges.
    - Composite primary key: `PRIMARY KEY(source_entity_id, target_entity_id, relation_type)`.
    - Cascading foreign keys:
      - `FOREIGN KEY(source_entity_id) REFERENCES entities(id) ON DELETE CASCADE`
@@ -348,6 +358,31 @@ Idempotently imports observations and entities from `.jsonl` files into the data
 - **Automatic FTS Synchronization**: As records are inserted, SQLite triggers (`obs_ai`) automatically index each observation in `observations_fts`.
 - **Single Transaction**: The entire import executes within a single `db.transaction()` block for speed and all-or-nothing consistency.
 
+#### 8. `getSessionBrief(options?: SessionBriefOptions): SessionBrief`
+
+Builds the typed, bounded session-start view from the service database. The same assembly and
+renderer are used by the standalone `readSessionBrief` entry point (CLI and default MCP server), which
+opens an existing database read-only and closes it when the reader owns the connection. The brief contains:
+
+- project identity (stored project row when available, otherwise name/root/Git metadata derived from
+  the selected root);
+- active decisions grouped by stored `topic_key`, with unkeyed decisions kept in a separate list and
+  duplicate active keys shown as separate decisions rather than collapsed;
+- recent activity ordered by `updated_at DESC, created_at DESC, rowid DESC`, excluding active decisions
+  already listed, with superseded entries labelled and linked to their replacement;
+- indexed symbols selected by up to 20 normalized project-relative file/directory paths (absolute
+  in-project paths are accepted); selection queries existing `entities.file_path` values only and
+  never walks the filesystem;
+- counts of all observations (including superseded), entities, and links for the project, using
+  `null` rather than zero when the database could not be read;
+- explanatory notes for omitted or unavailable data.
+
+`renderSessionBrief` converts the brief to deterministic Markdown. The complete rendered output,
+including headings, notes, and truncation markers, is measured against `budgetChars` (positive integer,
+default 8,000, maximum 20,000); oversized output is visibly truncated, including for very small
+budgets. Paths escaping the project root and invalid budgets are rejected. All read-only failures are
+converted to an empty brief with unavailable counts and a cause note instead of being thrown.
+
 ## 3. Muninn Memory Engine — Model Context Protocol (MCP) Server Architecture
 
 The `src/mcp/` module implements a Model Context Protocol (MCP) server exposing Muninn memory operations directly to AI coding agents (Claude Code, Cursor, OpenCode, Windsurf) over standard input/output (`stdio`) using standard JSON-RPC 2.0.
@@ -430,6 +465,7 @@ sequenceDiagram
             else Handler Succeeds
                 M-->>S: result
                 S-->>T: { content: [{ type: "text", text: JSON.stringify(result) }] }
+                Note over S: muninn_bootstrap returns the shared Markdown text directly
             end
         end
     end
@@ -453,6 +489,7 @@ export interface IMemoryService {
   ): { observation: Observation; entity: Entity };
   inspectSymbol(symbol: string, projectId?: string): SymbolInspection | null;
   getStats(projectId?: string): MemoryStats;
+  getSessionBrief(options?: SessionBriefOptions): SessionBrief;
   syncToDisk(
     targetPath?: string,
     options?: { projectId?: string; allProjects?: boolean }
@@ -463,8 +500,8 @@ export interface IMemoryService {
 ```
 
 - `isMemoryService(obj)`: Runtime type guard verifying that an object satisfies the service interface.
-- `createMcpServer(serviceOrOptions?)`: Accepts an instance of `IMemoryService` directly or options to instantiate a default `MemoryService`.
-- Attaches the service reference as both `server.service` and `server.memoryService` on the returned `MuninnServer`.
+- `createMcpServer(serviceOrOptions?)`: Accepts an instance of `IMemoryService` directly. With options (or no argument), the writable `MemoryService` is created lazily on the first non-bootstrap tool call; `muninn_bootstrap` uses the read-only entry point and does not initialize a database. The service is exposed as `server.service` / `server.memoryService` and can be closed with `server.closeService()`.
+- `startMcpServer(options?)`: Returns a lazy handle with the same read-only bootstrap behavior. Accessing the handle's `service` creates the writable service; `closeService()` closes it only if it was created.
 
 ### Declarative Tool Registry (`TOOL_REGISTRY`)
 
@@ -497,6 +534,7 @@ The exported `MUNINN_TOOLS: Tool[]` array is dynamically generated from `TOOL_RE
 | `muninn_link_symbol` | `MuninnLinkSymbolSchema` | - `observationId`: Trimmed string, min 1 char<br>- `symbol`: String (min 1 char) or `SymbolSchema` object | `service.linkSymbol(input.observationId, input.symbol)` |
 | `muninn_stats` | `MuninnStatsSchema` | - `allProjects`: Optional boolean (default: false) | `service.getStats(allProjects ? undefined : currentProject.id)` |
 | `muninn_inspect_symbol` | `MuninnInspectSymbolSchema` | - `symbol`: Trimmed string, 1–2,000 chars<br>- `projectId` / `project_id`: Optional trimmed string | `service.inspectSymbol(symbol, projectId)` returning symbol definition, file location, incoming/outgoing dependencies, and linked observations |
+| `muninn_bootstrap` | `MuninnBootstrapSchema` | - `paths`: Optional array of 1–20 trimmed path strings (max 4,096 chars each)<br>- `budgetChars` / `budget_chars`: Optional positive integer, max 20,000, default 8,000 | Read-only `readSessionBrief` (default server) or `service.getSessionBrief` (injected service); returns the shared Markdown directly rather than JSON |
 | `muninn_verify_contract` | `MuninnVerifyContractSchema` | - `files`: Optional array of strings or single string (transformed to array), max 500 items, 1–1,000 chars per path<br>- `projectRoot` / `project_root`: Optional trimmed string (enforced inside permitted project root) | `verifyTypeScriptContracts(targetRoot, files)` returning `{ valid, errorsCount, diagnostics }` with line/column locations and visual code snippets |
 
 #### Symbol Schema Refinement (`SymbolSchema`)
@@ -565,6 +603,7 @@ flowchart TD
     SUBCMD -- "search" --> SRCH["MemoryService.search() (BM25)"]
     SUBCMD -- "sync" --> SYNC["MemoryService.syncToDisk() / importFromDisk()"]
     SUBCMD -- "index" --> IDX["indexFilesIntoMuninn()"]
+    SUBCMD -- "brief" --> BRIEF["readSessionBrief() (read-only Markdown)"]
     SUBCMD -- "help / unknown" --> USAGE["printMemoryUsage()"]
 
     MCP --> MCPSUBCMD{"subcommand"}
@@ -645,7 +684,19 @@ flowchart TD
     ```
   - Calls `service.close?.()` in a mandatory `finally` block to release file locks.
 
-#### 5. `muninn mcp run`
+#### 5. `muninn memory brief [--project <path>] [--paths a,b] [--budget <n>]`
+
+- **Purpose**: Prints the same bounded, deterministic session brief as the library and MCP tool.
+- **Workflow**:
+  - Parses comma-separated `--paths` (at most 20) and an optional positive integer `--budget`
+    (maximum 20,000; the service default is 8,000).
+  - Calls `readSessionBrief({ dbPath, projectRoot, paths, budgetChars })` directly, without
+    constructing a writable `MemoryService`.
+  - Prints exactly `brief.markdown` to stdout. Missing/corrupt databases produce an empty,
+    explanatory brief instead of an error; path escapes, excessive paths, and invalid budgets set
+    `process.exitCode = 1`.
+
+#### 6. `muninn mcp run`
 - **Purpose**: Spawns and manages the long-running Model Context Protocol stdio server process.
 - **Workflow**:
   - Accepts optional `--db <path>` and `--project <path>`.
@@ -832,13 +883,13 @@ export const TypeValidator = {
 
 ## 6. Topological AST Symbol & Dependency Indexer
 
-Codebase intelligence and semantic memory in Muninn are powered by the AST indexer in `src/indexer/ast-indexer.ts`. It parses TypeScript and JavaScript source files into an entity-relationship graph representing code symbols (functions, classes, interfaces, methods) and their structural dependencies (imports, extends, implements, calls, references).
+Codebase intelligence and semantic memory in Muninn are powered by the AST indexer in `src/indexer/ast-indexer.ts`. It parses TypeScript and JavaScript source files into an entity-relationship graph representing code symbols (functions, classes, interfaces, methods) and their structural dependencies (imports, extends, implements, references). The schema reserves `calls` as a relation type, but the current indexer does not emit call edges.
 
 ### Architectural Motivation & Knowledge Graph Role
 
 LLM agents operating on source code often suffer from "context blindness" regarding symbol hierarchies, type implementations, and impact radius. The AST indexer builds an in-database dependency graph in SQLite (`entities` and `entity_dependencies` tables) that allows agents to:
 - Instantly locate symbol declarations and their containing files.
-- Inspect incoming and outgoing dependencies (who imports/calls/extends this symbol).
+- Inspect incoming and outgoing dependencies (who imports/extends/implements/references this symbol).
 - Associate Muninn memory observations (architectural decisions, bug fixes, conventions) with exact code symbols via `observation_entities`.
 
 ### AST Parsing Engine & Memory Optimization (`extractAstData`)
@@ -870,7 +921,7 @@ Symbols are uniquely identified across the project using canonical format `<relP
 
 ### Dependency Extraction & Module Specifier Normalization
 
-The indexer extracts five types of topological relationships:
+The indexer extracts four topological relationship types, plus module-specifier normalization:
 
 ```mermaid
 flowchart LR
@@ -882,10 +933,13 @@ flowchart LR
 ```
 
 1. **`imports`**: Extracted from `ts.ImportDeclaration` and `ts.ExportDeclaration` (re-exports). Records both module-level dependencies and named imported symbols.
-2. **`normalizeModuleSpecifier`**: Resolves relative imports (`./foo.js` -> `./foo.ts`, `.mjs`/`.cjs` -> `.ts`, `.jsx` -> `.tsx`) against the importing file's directory according to TypeScript ESM conventions, while preserving non-relative package specifiers (e.g. `chalk`, `@opencode-ai/sdk`).
-3. **`extends`**: Extracted from class and interface `heritageClauses` (`clause.token === ts.SyntaxKind.ExtendsKeyword`).
-4. **`implements`**: Extracted from class `heritageClauses` (`clause.token === ts.SyntaxKind.ImplementsKeyword`).
-5. **`references`**: Created automatically between the file entity and every symbol declared within that file.
+2. **`extends`**: Extracted from class and interface `heritageClauses` (`clause.token === ts.SyntaxKind.ExtendsKeyword`).
+3. **`implements`**: Extracted from class `heritageClauses` (`clause.token === ts.SyntaxKind.ImplementsKeyword`).
+4. **`references`**: Created automatically between the file entity and every symbol declared within that file.
+
+Relative specifiers are normalized with **`normalizeModuleSpecifier`**: `./foo.js` -> `./foo.ts`,
+`.mjs`/`.cjs` -> `.ts`, and `.jsx` -> `.tsx`, resolved against the importing file's directory;
+non-relative package specifiers (e.g. `chalk`, `@opencode-ai/sdk`) are preserved.
 
 ### Two-Stage Non-Blocking Batch Indexing Architecture (`indexFilesIntoMuninn`)
 
