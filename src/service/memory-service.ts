@@ -1000,6 +1000,12 @@ function assembleSessionBrief(
 
     if (expandGraph && symbols.length > 0) {
       const relatedById = new Map<string, SymbolNeighbor>();
+      // The related section exists to add what the selected paths did not name.
+      // A neighbor that is itself path-selected is already printed under
+      // "Indexed Symbols", so listing it again would spend the brief's budget
+      // on a duplicate and read like a second, different symbol.
+      const listedSymbolIds = new Set(symbols.map((symbol) => symbol.id));
+      let traversedNeighbor = false;
       for (const symbol of symbols) {
         if (relatedById.size >= SESSION_BRIEF_RELATED_LIMIT) break;
         const traversal = collectNeighbors(
@@ -1009,14 +1015,18 @@ function assembleSessionBrief(
           SESSION_BRIEF_RELATED_LIMIT
         );
         for (const neighbor of traversal.neighbors) {
+          traversedNeighbor = true;
           if (relatedById.size >= SESSION_BRIEF_RELATED_LIMIT) break;
+          if (listedSymbolIds.has(neighbor.entity.id)) continue;
           if (!relatedById.has(neighbor.entity.id)) {
             relatedById.set(neighbor.entity.id, neighbor);
           }
         }
       }
       related.push(...relatedById.values());
-      if (related.length === 0) {
+      // "No neighbors" is only true when the graph had none to offer; a graph
+      // whose neighbors were all already listed omits the section silently.
+      if (!traversedNeighbor) {
         notes.push(
           "No indexed dependency neighbors were found for the selected symbol(s)."
         );

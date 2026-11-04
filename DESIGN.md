@@ -374,9 +374,11 @@ opens an existing database read-only and closes it when the reader owns the conn
   in-project paths are accepted); selection queries existing `entities.file_path` values only and
   never walks the filesystem;
 - deduplicated related symbols from the stored dependency graph when `expandGraph` is enabled
-  (default `true`), using the same bounded traversal as `MemoryService.neighbors`; the related
-  section is omitted when expansion is disabled or no stored edges exist, with a note explaining an
-  empty expansion;
+  (default `true`), using the same bounded traversal as `MemoryService.neighbors`; a neighbor that is
+  itself path-selected is excluded, because it is already listed under indexed symbols, and the
+  related section is omitted when expansion is disabled, when no stored edges exist, or when every
+  neighbor was already listed — the "no neighbors" note is reserved for a graph that truly offered
+  none;
 - counts of all observations (including superseded), entities, and links for the project, using
   `null` rather than zero when the database could not be read;
 - explanatory notes for omitted or unavailable data.

@@ -164,10 +164,12 @@ relation and direction, with deterministic ordering, cycle protection, and no du
 
 **REQ-24 — Expand briefs and inspection from the graph.** Session briefs shall accept `expandGraph`
 (default `true`) and include deduplicated related symbols for the path-selected entities within the
-existing Markdown budget. A disabled expansion adds no related section; an enabled expansion with no
-stored dependencies omits the section and explains why in `notes`. `muninn_inspect_symbol` shall add
-a bounded depth-1 neighbor traversal from the same implementation while retaining its existing
-inspection fields and without adding a new MCP tool.
+existing Markdown budget; a neighbor that is itself path-selected is already listed under indexed
+symbols and shall not be repeated in the related section. A disabled expansion adds no related
+section; an expansion whose graph has no stored dependencies omits the section and explains why in
+`notes`, while one whose neighbors were all already listed omits it silently. `muninn_inspect_symbol`
+shall add a bounded depth-1 neighbor traversal from the same implementation while retaining its
+existing inspection fields and without adding a new MCP tool.
 
 ### Search, symbols, synchronization, and statistics
 

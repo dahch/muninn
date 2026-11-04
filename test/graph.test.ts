@@ -315,6 +315,38 @@ describe("Graph-aware recovery (Iteration 3)", () => {
     expect(new Set(capped.related.map((item) => item.entity.id)).size).toBe(50);
   });
 
+  it("keeps path-selected symbols out of the related section", () => {
+    // `b` is both path-selected and a neighbor of `a`. Printing it under
+    // "Related Symbols" would duplicate the "Indexed Symbols" entry and read
+    // like a second symbol under the same name.
+    const a = entity("a", "src/a.ts");
+    const b = entity("b", "src/b.ts");
+    const c = entity("c", "src/c.ts");
+    edge(a, b, "imports");
+    edge(a, c, "imports");
+
+    const bothListed = service.getSessionBrief({
+      paths: ["src/a.ts", "src/b.ts"],
+    });
+    expect(bothListed.symbols.map((symbol) => symbol.identifier)).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(bothListed.related.map((item) => item.entity.identifier)).toEqual([
+      "c",
+    ]);
+    expect(bothListed.markdown).not.toMatch(/Related Symbols[\s\S]*`b`/);
+
+    // Every neighbor is already listed: the section is omitted, and the brief
+    // does not claim the graph was empty when it was not.
+    const onlyListed = service.getSessionBrief({ paths: ["src/a.ts", "src/b.ts", "src/c.ts"] });
+    expect(onlyListed.related).toEqual([]);
+    expect(onlyListed.markdown).not.toContain("## Related Symbols");
+    expect(onlyListed.notes.join(" ")).not.toContain(
+      "No indexed dependency neighbors were found"
+    );
+  });
+
   it("honors expandGraph on the standalone read-only helper", () => {
     const root = entity("root", "src/root.ts");
     edge(root, entity("neighbor", "src/neighbor.ts"), "imports");
