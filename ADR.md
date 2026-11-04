@@ -1,9 +1,9 @@
 # Architecture Decision Records
 
-Decisions are listed in recording order. `ADR-1` and `ADR-2` are implemented in the current
-codebase. `ADR-3` is still a proposal that is not implemented yet. `ADR-4`–`ADR-10` were recorded
-retroactively from the 0.1.0 codebase so the existing architecture has an explicit history.
-`ADR-11` records a correction to the dependency relation set described in `ADR-6`.
+Decisions are listed in recording order. `ADR-1`–`ADR-3` are implemented in the current codebase.
+`ADR-4`–`ADR-10` were recorded retroactively from the 0.1.0 codebase so the existing architecture has
+an explicit history. `ADR-11` records a correction to the dependency relation set described in
+`ADR-6`.
 
 ## ADR-1: Track decision supersession in observation rows
 
@@ -49,7 +49,7 @@ retroactively from the 0.1.0 codebase so the existing architecture has an explic
 ## ADR-3: Reuse the stored dependency graph for neighbor recovery
 
 - **Date**: 2026-11-04
-- **Status**: Proposed (not implemented in this codebase)
+- **Status**: Accepted and implemented
 - **Context**: Muninn already persists symbol dependencies, but recovery does not traverse them. The
   proposed feature requires related symbols in session briefs and inspection without adding a new
   graph tool or inferring relationships. Alternatives include leaving graph data unused, deriving
@@ -58,11 +58,11 @@ retroactively from the 0.1.0 codebase so the existing architecture has an explic
 - **Decision**: Add a service-level neighbor traversal over `entity_dependencies`, following edges in
   both directions with bounded depth and result count, deterministic grouping, and cycle protection.
   Use the same traversal for brief graph expansion and symbol inspection.
-- **Consequences**: Graph recovery would use only indexed evidence and avoid duplicate traversal
+- **Consequences**: Graph recovery uses only indexed evidence and avoids duplicate traversal
   implementations. Results are limited by the configured depth and neighbor cap; graph data that has
-  not been indexed cannot provide related symbols and must be reported as absent rather than inferred.
-  **No implementation exists yet**: `MemoryService.neighbors` and the `related` brief section are
-  not part of the current source tree.
+  not been indexed cannot provide related symbols and is reported as absent rather than inferred.
+  Implemented by `MemoryService.neighbors`, the session brief's `related` section and `expandGraph`
+  option, and the depth-1 `neighbors` field returned by `muninn_inspect_symbol`.
 
 ## ADR-4: Store memory in one embedded SQLite database with FTS5
 

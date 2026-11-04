@@ -1560,6 +1560,7 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
         getContext: vi.fn().mockReturnValue([]),
         linkSymbol: vi.fn(),
         inspectSymbol: vi.fn().mockReturnValue(null),
+        neighbors: vi.fn().mockReturnValue(null),
         getStats: vi.fn().mockReturnValue({ projects: 1, observations: 0, entities: 0, links: 0 }),
         getSessionBrief: vi.fn(),
         syncToDisk: vi.fn(),
@@ -1571,6 +1572,77 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
       expect(s.service).toBe(mockService);
       expect(s.memoryService).toBe(mockService);
       await s.close();
+    });
+
+    it("forwards expandGraph on the lazy default bootstrap route", async () => {
+      const dbPath = path.join(tempDir, ".huginn", "muninn.db");
+      const seedService = new MemoryService({ dbPath, projectRoot: tempDir });
+      try {
+        seedService.db
+          .prepare(
+            `INSERT INTO entities (id, project_id, entity_type, identifier, file_path)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(
+            "root-id",
+            seedService.currentProject.id,
+            "function",
+            "root",
+            "src/root.ts"
+          );
+        seedService.db
+          .prepare(
+            `INSERT INTO entities (id, project_id, entity_type, identifier, file_path)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(
+            "neighbor-id",
+            seedService.currentProject.id,
+            "function",
+            "neighbor",
+            "src/neighbor.ts"
+          );
+        seedService.db
+          .prepare(
+            `INSERT INTO entity_dependencies (source_entity_id, target_entity_id, relation_type)
+             VALUES (?, ?, ?)`
+          )
+          .run("root-id", "neighbor-id", "imports");
+      } finally {
+        seedService.close();
+      }
+
+      const defaultServer = createMcpServer({ dbPath, projectRoot: tempDir });
+      const [defaultServerTransport, defaultClientTransport] =
+        InMemoryTransport.createLinkedPair();
+      await defaultServer.connect(defaultServerTransport);
+      const defaultClient = new Client(
+        { name: "default-brief-client", version: "1.0.0" },
+        { capabilities: {} }
+      );
+      await defaultClient.connect(defaultClientTransport);
+
+      try {
+        const disabled = await defaultClient.callTool({
+          name: "muninn_bootstrap",
+          arguments: { paths: ["src/root.ts"], expand_graph: false },
+        });
+        expect((disabled.content as Array<{ text: string }>)[0].text).not.toContain(
+          "## Related Symbols"
+        );
+
+        const enabled = await defaultClient.callTool({
+          name: "muninn_bootstrap",
+          arguments: { paths: ["src/root.ts"] },
+        });
+        const enabledText = (enabled.content as Array<{ text: string }>)[0].text;
+        expect(enabledText).toContain("## Related Symbols");
+        expect(enabledText).toContain("`neighbor`");
+      } finally {
+        await defaultClient.close();
+        await defaultServer.close();
+        defaultServer.closeService();
+      }
     });
   });
 

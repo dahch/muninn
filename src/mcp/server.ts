@@ -257,6 +257,14 @@ export const MuninnBootstrapSchema = z.object({
     )
     .nullish()
     .describe("Maximum rendered Markdown length (default 8000, max 20000, snake_case)"),
+  expandGraph: z
+    .boolean()
+    .nullish()
+    .describe("Whether to include bounded dependency neighbors (default true)"),
+  expand_graph: z
+    .boolean()
+    .nullish()
+    .describe("Whether to include bounded dependency neighbors (default true, snake_case)"),
 });
 
 export type MuninnBootstrapInput = z.infer<typeof MuninnBootstrapSchema>;
@@ -363,7 +371,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_inspect_symbol: {
     name: "muninn_inspect_symbol",
     description:
-      "Inspect a code entity/symbol in Muninn memory, returning its definition, file location, dependencies (imports, extends, calls), and linked observations.",
+      "Inspect a code entity/symbol in Muninn memory, returning its definition, file location, dependencies (imports, extends, calls), bounded depth-1 graph neighbors, and linked observations.",
     schema: MuninnInspectSymbolSchema,
     handler: (service, input) => {
       const projectId =
@@ -391,6 +399,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
       service.getSessionBrief({
         paths: input.paths ?? undefined,
         budgetChars: input.budgetChars ?? input.budget_chars,
+        expandGraph: input.expandGraph ?? input.expand_graph,
       }).markdown,
   },
   muninn_verify_contract: {
@@ -518,6 +527,12 @@ export function normalizeArgs(
     normalized.budgetChars === undefined
   ) {
     normalized.budgetChars = normalized.budget_chars;
+  }
+  if (
+    normalized.expand_graph !== undefined &&
+    normalized.expandGraph === undefined
+  ) {
+    normalized.expandGraph = normalized.expand_graph;
   }
   return normalized;
 }
@@ -750,6 +765,7 @@ export function createMcpServer(
           db: options?.db,
           paths: input.paths ?? undefined,
           budgetChars: input.budgetChars ?? input.budget_chars ?? undefined,
+          expandGraph: input.expandGraph ?? input.expand_graph,
         });
         return {
           content: [

@@ -22,6 +22,14 @@
   the same renderer output. Bootstrap accepts up to 20 in-project paths and budgets from 1 to 20,000
   characters (default 8,000); default MCP servers defer writable database initialization until a
   non-bootstrap tool is used.
+- Graph-aware recovery: `MemoryService.neighbors(identifier, { depth?, limit? })` traverses stored
+  `entity_dependencies` edges in both directions, grouped by relation and direction with
+  deterministic ordering, cycle protection, and entity deduplication. Depth defaults to 1 and is
+  clamped to 2; the neighbor limit defaults to 20 and is clamped to 50.
+- Session briefs expand deduplicated related symbols by default within the existing Markdown budget
+  (`expandGraph` / `expand_graph` can disable it), and `muninn_inspect_symbol` now adds a bounded
+  depth-1 neighbor traversal while retaining its existing inspection data. No new MCP tool, schema
+  element, inferred relationship, or dependency was added.
 
 ## 0.1.0
 

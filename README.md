@@ -19,12 +19,17 @@ package with no dependency on the orchestrator.
   Search and context hide superseded observations by default; pass `includeSuperseded` to see them.
 - **Read-only session brief** — the library, MCP `muninn_bootstrap` tool, and
   `muninn memory brief` render the same deterministic Markdown view of project identity, active
-  decisions, recent activity, path-selected indexed symbols, and counts. Bootstrap reads an existing
-  database without DDL or project insertion and fails open when memory is missing or unusable.
+  decisions, recent activity, path-selected indexed symbols, related graph neighbors, and counts.
+  Bootstrap reads an existing database without DDL or project insertion and fails open when memory
+  is missing or unusable.
 - **A symbol graph** — the TypeScript Compiler API extracts files, functions, classes,
   interfaces and modules from your sources, plus the `imports`/`extends`/`implements`/
   `references` edges between them, and links observations to symbols. The schema also reserves a
   `calls` relation, but the current indexer does not emit call edges.
+- **Graph-aware recovery** — `MemoryService.neighbors` traverses stored dependency edges in both
+  directions, grouped by relation and direction, with deduplication, cycle protection, depth at most
+  2 (default 1), and at most 50 neighbors (default 20). Briefs expand these neighbors by default,
+  and `muninn_inspect_symbol` adds a bounded depth-1 traversal.
 - **MCP tools** for agents: `muninn_context`, `muninn_save`, `muninn_search`,
   `muninn_link_symbol`, `muninn_inspect_symbol`, `muninn_verify_contract`, `muninn_stats`,
   `muninn_bootstrap`.
@@ -78,8 +83,10 @@ Both the database file and the project record are resolved from the **same** roo
 `muninn memory brief` is read-only. `--paths` accepts up to 20 comma-separated files or directories
 (relative to the project root, or absolute inside it) and selects only indexed symbols. `--budget`
 limits the complete Markdown output to a positive integer no greater than 20,000 characters; the
-default is 8,000. A missing, inaccessible, or corrupt database yields an empty brief with an
-explanatory note instead of being created or repaired.
+default is 8,000. Briefs expand dependency neighbors by default; `getSessionBrief({ expandGraph:
+false })` and MCP `expandGraph` / `expand_graph` disable that section. If the selected symbols have no
+stored dependencies, the section is omitted and a note explains why. A missing, inaccessible, or
+corrupt database yields an empty brief with an explanatory note instead of being created or repaired.
 
 ## MCP
 
@@ -109,9 +116,10 @@ The `muninn_save` tool accepts `supersedesTopicKey` / `supersedes_topic_key`, an
 calls keep working: replacement is opt-in and retrieval excludes superseded observations by
 default.
 
-`muninn_bootstrap` optionally accepts `paths` (at most 20) and `budgetChars` / `budget_chars`
-(default 8,000, maximum 20,000). It returns the shared service-rendered Markdown directly, not a
-JSON wrapper, and does not create or initialize a database when called on a default server.
+`muninn_bootstrap` optionally accepts `paths` (at most 20), `budgetChars` / `budget_chars`
+(default 8,000, maximum 20,000), and `expandGraph` / `expand_graph` (default `true`, disabling the
+related-symbol expansion). It returns the shared service-rendered Markdown directly, not a JSON
+wrapper, and does not create or initialize a database when called on a default server.
 
 ## Architecture
 
@@ -175,6 +183,10 @@ for (const hit of memory.search({ query: "token validation", limit: 5 })) {
 const brief = memory.getSessionBrief({ paths: ["src/auth"], budgetChars: 8000 });
 console.log(brief.markdown);
 
+// Bounded, deterministic dependency neighbors (depth max 2, limit max 50).
+const graph = memory.neighbors("src/auth/port.ts::TokenValidator", { depth: 2 });
+console.log(graph?.groups);
+
 memory.close();
 ```
 
@@ -197,7 +209,7 @@ Subpath entry points are available for narrower imports:
 |---|---|
 | `@dahch/muninn` | everything below |
 | `@dahch/muninn/db` | SQLite client, schema, path resolution, project records |
-| `@dahch/muninn/service` | `MemoryService` (save, search, context, linking, sync, stats, session brief) |
+| `@dahch/muninn/service` | `MemoryService` (save, search, context, linking, sync, stats, session brief, graph neighbors) |
 | `@dahch/muninn/indexer` | AST symbol/dependency extraction and indexing |
 | `@dahch/muninn/mcp` | MCP server, tool registry, bounded stdio transport |
 | `@dahch/muninn/contracts` | TypeScript contract verification |
@@ -210,7 +222,7 @@ Muninn has no required environment variables. Configuration is passed as CLI fla
 
 | Variable | Type | Default | Purpose |
 |---|---|---|---|
-| `MUNINN_DEBUG` | string (presence is enough) | unset | Emit `[muninn] mcp run` lifecycle diagnostics on stderr, including stdin-close shutdown messages. |
+| `MUNINN_DEBUG` | string (presence is enough) | unset | Emit the `[muninn] mcp run: stdin closed by the client; shutting down.` diagnostic on stderr when the parent closes stdin. |
 | `HUGINN_DEBUG` | string (presence is enough) | unset | Legacy alias for `MUNINN_DEBUG`, retained for Huginn compatibility. |
 
 ## Security notes
@@ -266,19 +278,19 @@ src/
   cli.ts                 argument parsing, command routing, process entry point
   commands/              memory (init/search/sync/index/brief), mcp run, check
   db/                    SQLite client, schema.sql, path and project resolution
-  service/               MemoryService: save, search, context, links, sync, stats, session brief
+  service/               MemoryService: save, search, context, links, sync, stats, brief, neighbors
   indexer/               TypeScript/JavaScript AST symbol and dependency extraction
   mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
   contracts/             in-process TypeScript contract verification
   util/                  terminal-text sanitizer and path-safety helpers
-test/                    Vitest integration suites for db, service, session brief, indexer, MCP, CLI, contracts
+test/                    Vitest integration suites for db, service, session brief, graph, indexer, MCP, CLI, contracts
 ```
 
 ## Documentation
 
 - [`SPEC.md`](./SPEC.md) — product behaviour, domain model, use cases and constraints.
 - [`DESIGN.md`](./DESIGN.md) — technical design, schema, data flow and internals.
-- [`ADR.md`](./ADR.md) — architecture decision records, including which decisions are not yet implemented.
+- [`ADR.md`](./ADR.md) — architecture decision records and their implementation status.
 - [`CHANGELOG.md`](./CHANGELOG.md) — release notes.
 - [`AGENTS.md`](./AGENTS.md) — repository conventions for coding agents; no `.opencode/agents/` are defined.
 

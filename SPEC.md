@@ -3,14 +3,14 @@
 Muninn is a standalone, local-first memory engine for coding agents and developers. It stores
 project observations in SQLite, searches them with FTS5/BM25, indexes TypeScript and JavaScript
 symbols and their dependencies, and exposes memory operations through a library, CLI, and MCP
-server. The current codebase adds explicit decision supersession with lifecycle-aware retrieval and a
-read-only session-bootstrap brief shared by the library, MCP, and CLI. The project is independent of
-Huginn and can be embedded by any compatible client.
+server. The current codebase adds explicit decision supersession with lifecycle-aware retrieval, a
+read-only session-bootstrap brief shared by the library, MCP, and CLI, and bounded dependency-neighbor
+recovery. The project is independent of Huginn and can be embedded by any compatible client.
 
 > **Implementation status (current codebase):** session briefs/read-only bootstrap (ADR-2) are
 > implemented through `MemoryService.getSessionBrief`, `readSessionBrief`, `muninn_bootstrap`, and
-> `muninn memory brief`. Dependency-neighbor recovery (ADR-3) remains proposed and is listed under
-> [Planned, not implemented](#planned-not-implemented).
+> `muninn memory brief`. Dependency-neighbor recovery (ADR-3) is implemented through
+> `MemoryService.neighbors`, brief `expandGraph`, and the `neighbors` field on symbol inspection.
 
 ## Goals
 
@@ -27,7 +27,7 @@ Huginn and can be embedded by any compatible client.
 - Generating summaries or other content with a model.
 - Adding embeddings, vector search, network services, dependencies, or database tables.
 - Inferring decisions, symbols, dependencies, or other facts not stored in Muninn.
-- Graph-neighbor traversal in this release (see the proposed ADR-3).
+- Relationships derived from names, paths, or proximity instead of stored dependency edges.
 
 ## Users and personas
 
@@ -154,6 +154,21 @@ validation and camelCase/snake_case aliases) and `muninn memory brief [--project
 [--budget <n>]` shall return the service renderer output. Default MCP servers shall not initialize a
 writable database merely to serve bootstrap.
 
+### Graph-aware recovery (ADR-3)
+
+**REQ-23 — Traverse stored dependency neighbors with bounds.** `MemoryService.neighbors(identifier,
+{ depth?, limit? })` shall follow stored `entity_dependencies` edges in both directions, grouped by
+relation and direction, with deterministic ordering, cycle protection, and no duplicate entities.
+`depth` defaults to 1 and is clamped to at most 2; `limit` defaults to 20 and is clamped to at most
+50. Unknown identifiers return no traversal. No relationship is inferred from names or paths.
+
+**REQ-24 — Expand briefs and inspection from the graph.** Session briefs shall accept `expandGraph`
+(default `true`) and include deduplicated related symbols for the path-selected entities within the
+existing Markdown budget. A disabled expansion adds no related section; an enabled expansion with no
+stored dependencies omits the section and explains why in `notes`. `muninn_inspect_symbol` shall add
+a bounded depth-1 neighbor traversal from the same implementation while retaining its existing
+inspection fields and without adding a new MCP tool.
+
 ### Search, symbols, synchronization, and statistics
 
 **REQ-7 — Preserve FTS5/BM25 search and recent context.** Search shall continue to use SQLite FTS5
@@ -274,11 +289,7 @@ still counted, exported, inspected, and returned when explicitly requested.
 
 ## Planned, not implemented
 
-The following were specified but are **not present** in the 0.1.0 codebase. Do not plan integrations
-around them without first implementing and testing them.
-
-- **Dependency-neighbor recovery (ADR-3).** A bounded `MemoryService.neighbors` traversal over
-  `entity_dependencies`, graph expansion in briefs, and a neighbors field in `muninn_inspect_symbol`.
+No planned feature from the current specification remains unimplemented.
 
 ## Out of scope
 

@@ -130,9 +130,47 @@ export const MAX_SESSION_BRIEF_BUDGET = 20_000;
 export const MAX_SESSION_BRIEF_PATHS = 20;
 export const SESSION_BRIEF_RECENT_ACTIVITY_LIMIT = 20;
 
+export const DEFAULT_NEIGHBOR_DEPTH = 1;
+export const MAX_NEIGHBOR_DEPTH = 2;
+export const DEFAULT_NEIGHBOR_LIMIT = 20;
+export const MAX_NEIGHBOR_LIMIT = 50;
+export const SESSION_BRIEF_RELATED_LIMIT = MAX_NEIGHBOR_LIMIT;
+
+export type NeighborDirection = "outgoing" | "incoming";
+
+export interface NeighborOptions {
+  depth?: number | null;
+  limit?: number | null;
+}
+
+export interface SymbolNeighbor {
+  entity: Entity;
+  relationType: DependencyRelationType;
+  direction: NeighborDirection;
+  /** BFS distance from the inspected entity, starting at 1. */
+  depth: number;
+}
+
+export interface SymbolNeighborGroup {
+  direction: NeighborDirection;
+  relationType: DependencyRelationType;
+  neighbors: SymbolNeighbor[];
+}
+
+export interface SymbolNeighbors {
+  entity: Entity;
+  depth: number;
+  limit: number;
+  groups: SymbolNeighborGroup[];
+  /** Flat, deterministically ordered view of `groups` without duplicate entities. */
+  neighbors: SymbolNeighbor[];
+  truncated: boolean;
+}
+
 export interface SessionBriefOptions {
   paths?: string[] | null;
   budgetChars?: number | null;
+  expandGraph?: boolean | null;
 }
 
 export interface SessionBriefRequest extends SessionBriefOptions {
@@ -169,6 +207,8 @@ export interface SessionBriefContent {
   };
   recentActivity: Observation[];
   symbols: Entity[];
+  /** Deduplicated graph neighbors of the path-selected symbols. */
+  related: SymbolNeighbor[];
   counts: SessionBriefCounts;
   notes: string[];
   budgetChars: number;
@@ -190,6 +230,8 @@ export interface SymbolInspection {
     outgoing: SymbolInspectionDependency[];
     incoming: SymbolInspectionDependency[];
   };
+  /** Bounded depth-1 traversal over the same dependency graph as `neighbors`. */
+  neighbors: SymbolNeighbors;
   observations: Observation[];
 }
 
@@ -207,6 +249,10 @@ export interface IMemoryService {
     symbol: string,
     projectId?: string
   ): SymbolInspection | null;
+  neighbors(
+    identifier: string,
+    options?: NeighborOptions
+  ): SymbolNeighbors | null;
   getStats(projectId?: string): MemoryStats;
   getSessionBrief(options?: SessionBriefOptions): SessionBrief;
   syncToDisk(
@@ -463,6 +509,199 @@ function entityMatchesSelectedPaths(
   );
 }
 
+const NEIGHBOR_RELATION_ORDER: ReadonlyArray<DependencyRelationType> = [
+  "imports",
+  "calls",
+  "implements",
+  "extends",
+  "references",
+];
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
+function compareEntities(left: Entity, right: Entity): number {
+  if (left.identifier !== right.identifier) {
+    return left.identifier < right.identifier ? -1 : 1;
+  }
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
+/**
+ * Resolves an entity using the same exact, suffix, and prefix/path tiers used by
+ * symbol inspection. Callers always pass a concrete project id.
+ */
+function resolveEntityByIdentifier(
+  db: Database.Database,
+  projectId: string,
+  identifier: string
+): Entity | undefined {
+  if (!identifier || typeof identifier !== "string" || !identifier.trim()) {
+    return undefined;
+  }
+
+  const query = identifier.trim();
+  const exact = db
+    .prepare<[string, string], Entity>(
+      `SELECT id, project_id, entity_type, identifier, file_path
+       FROM entities
+       WHERE project_id = ? AND identifier = ?`
+    )
+    .get(projectId, query);
+  if (exact) return exact;
+
+  const escapedQuery = escapeLikePattern(query);
+  const suffix = db
+    .prepare<[string, string, string], Entity>(
+      `SELECT id, project_id, entity_type, identifier, file_path
+       FROM entities
+       WHERE project_id = ? AND (identifier LIKE '%::' || ? ESCAPE '\\' OR identifier LIKE '%.' || ? ESCAPE '\\')
+       ORDER BY identifier ASC, id ASC
+       LIMIT 1`
+    )
+    .get(projectId, escapedQuery, escapedQuery);
+  if (suffix) return suffix;
+
+  return db
+    .prepare<[string, string, string], Entity>(
+      `SELECT id, project_id, entity_type, identifier, file_path
+       FROM entities
+       WHERE project_id = ? AND (identifier LIKE ? || '%' ESCAPE '\\' OR file_path = ?)
+       ORDER BY identifier ASC, id ASC
+       LIMIT 1`
+    )
+    .get(projectId, escapedQuery, query);
+}
+
+function resolveNeighborDepth(value: number | null | undefined): number {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return DEFAULT_NEIGHBOR_DEPTH;
+  }
+  const depth = Math.floor(value);
+  if (depth < 1) return DEFAULT_NEIGHBOR_DEPTH;
+  return Math.min(depth, MAX_NEIGHBOR_DEPTH);
+}
+
+function resolveNeighborLimit(value: number | null | undefined): number {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return DEFAULT_NEIGHBOR_LIMIT;
+  }
+  const limit = Math.floor(value);
+  if (limit < 1) return DEFAULT_NEIGHBOR_LIMIT;
+  return Math.min(limit, MAX_NEIGHBOR_LIMIT);
+}
+
+interface NeighborEdgeRow extends Entity {
+  relation_type: DependencyRelationType;
+}
+
+function collectNeighbors(
+  db: Database.Database,
+  root: Entity,
+  depthValue?: number | null,
+  limitValue?: number | null
+): SymbolNeighbors {
+  const depth = resolveNeighborDepth(depthValue);
+  const limit = resolveNeighborLimit(limitValue);
+  const visited = new Set<string>([root.id]);
+  const flat: SymbolNeighbor[] = [];
+  let frontier: Entity[] = [root];
+  let truncated = false;
+
+  const outgoingStatement = db.prepare<[string], NeighborEdgeRow>(
+    `SELECT e.id, e.project_id, e.entity_type, e.identifier, e.file_path, ed.relation_type
+     FROM entity_dependencies ed
+     JOIN entities e ON e.id = ed.target_entity_id
+     WHERE ed.source_entity_id = ?
+     ORDER BY ed.relation_type ASC, e.identifier ASC, e.id ASC`
+  );
+  const incomingStatement = db.prepare<[string], NeighborEdgeRow>(
+    `SELECT e.id, e.project_id, e.entity_type, e.identifier, e.file_path, ed.relation_type
+     FROM entity_dependencies ed
+     JOIN entities e ON e.id = ed.source_entity_id
+     WHERE ed.target_entity_id = ?
+     ORDER BY ed.relation_type ASC, e.identifier ASC, e.id ASC`
+  );
+
+  outer: for (let level = 1; level <= depth && frontier.length > 0; level++) {
+    const nextFrontier: Entity[] = [];
+    const orderedFrontier = [...frontier].sort(compareEntities);
+    for (const current of orderedFrontier) {
+      const directions: Array<{
+        direction: NeighborDirection;
+        rows: NeighborEdgeRow[];
+      }> = [
+        { direction: "outgoing", rows: outgoingStatement.all(current.id) },
+        { direction: "incoming", rows: incomingStatement.all(current.id) },
+      ];
+
+      for (const { direction, rows } of directions) {
+        const orderedRows = [...rows].sort((left, right) => {
+          const leftRelation = NEIGHBOR_RELATION_ORDER.indexOf(
+            left.relation_type
+          );
+          const rightRelation = NEIGHBOR_RELATION_ORDER.indexOf(
+            right.relation_type
+          );
+          if (leftRelation !== rightRelation) {
+            return leftRelation - rightRelation;
+          }
+          return compareEntities(left, right);
+        });
+
+        for (const row of orderedRows) {
+          if (visited.has(row.id)) continue;
+          if (flat.length >= limit) {
+            truncated = true;
+            break outer;
+          }
+          visited.add(row.id);
+          const entity: Entity = {
+            id: row.id,
+            project_id: row.project_id,
+            entity_type: row.entity_type,
+            identifier: row.identifier,
+            file_path: row.file_path,
+          };
+          flat.push({
+            entity,
+            relationType: row.relation_type,
+            direction,
+            depth: level,
+          });
+          nextFrontier.push(entity);
+        }
+      }
+    }
+    frontier = nextFrontier;
+  }
+
+  const groupsByKey = new Map<string, SymbolNeighborGroup>();
+  for (const neighbor of flat) {
+    const key = `${neighbor.direction}:${neighbor.relationType}`;
+    const existing = groupsByKey.get(key);
+    if (existing) {
+      existing.neighbors.push(neighbor);
+    } else {
+      groupsByKey.set(key, {
+        direction: neighbor.direction,
+        relationType: neighbor.relationType,
+        neighbors: [neighbor],
+      });
+    }
+  }
+
+  return {
+    entity: root,
+    depth,
+    limit,
+    groups: [...groupsByKey.values()],
+    neighbors: flat,
+    truncated,
+  };
+}
+
 function deriveSessionBriefProject(rootPath: string): SessionBriefProject {
   const root = path.resolve(rootPath);
   return {
@@ -577,6 +816,15 @@ function buildSessionBriefMarkdown(content: SessionBriefContent): string {
     }
   }
 
+  if (content.related.length > 0) {
+    lines.push("", "## Related Symbols");
+    for (const neighbor of content.related) {
+      lines.push(
+        `- \`${neighbor.entity.identifier}\` (${neighbor.entity.entity_type}) — \`${neighbor.entity.file_path}\``
+      );
+    }
+  }
+
   if (content.notes.length > 0) {
     lines.push("", "## Notes");
     for (const note of content.notes) {
@@ -640,7 +888,8 @@ function assembleSessionBrief(
   projectId: string | null,
   selectedPaths: string[],
   budgetChars: number,
-  notes: string[]
+  notes: string[],
+  expandGraph: boolean = true
 ): SessionBrief {
   let counts: SessionBriefCounts = {
     observations: 0,
@@ -651,6 +900,7 @@ function assembleSessionBrief(
   let unkeyed: Observation[] = [];
   let recentActivity: Observation[] = [];
   let symbols: Entity[] = [];
+  const related: SymbolNeighbor[] = [];
 
   if (projectId) {
     const countObservations = db
@@ -747,6 +997,31 @@ function assembleSessionBrief(
         notes.push("No indexed symbols matched the selected path(s).");
       }
     }
+
+    if (expandGraph && symbols.length > 0) {
+      const relatedById = new Map<string, SymbolNeighbor>();
+      for (const symbol of symbols) {
+        if (relatedById.size >= SESSION_BRIEF_RELATED_LIMIT) break;
+        const traversal = collectNeighbors(
+          db,
+          symbol,
+          DEFAULT_NEIGHBOR_DEPTH,
+          SESSION_BRIEF_RELATED_LIMIT
+        );
+        for (const neighbor of traversal.neighbors) {
+          if (relatedById.size >= SESSION_BRIEF_RELATED_LIMIT) break;
+          if (!relatedById.has(neighbor.entity.id)) {
+            relatedById.set(neighbor.entity.id, neighbor);
+          }
+        }
+      }
+      related.push(...relatedById.values());
+      if (related.length === 0) {
+        notes.push(
+          "No indexed dependency neighbors were found for the selected symbol(s)."
+        );
+      }
+    }
   } else {
     notes.push(
       "No project record was found in the database; project identity was derived from the selected root."
@@ -763,6 +1038,7 @@ function assembleSessionBrief(
     activeDecisions: { keyed, unkeyed },
     recentActivity,
     symbols,
+    related,
     counts,
     notes,
     budgetChars,
@@ -801,6 +1077,7 @@ function buildUnavailableSessionBrief(
     activeDecisions: { keyed: [], unkeyed: [] },
     recentActivity: [],
     symbols: [],
+    related: [],
     counts: { observations: null, entities: null, links: null },
     notes,
     budgetChars,
@@ -832,6 +1109,7 @@ export function readSessionBrief(
   );
   const budgetChars = resolveSessionBriefBudget(request.budgetChars);
   const selectedPaths = resolveSessionBriefPaths(request.paths, rootPath);
+  const expandGraph = request.expandGraph !== false;
 
   if (request.db) {
     try {
@@ -845,7 +1123,8 @@ export function readSessionBrief(
         projectRow?.id ?? null,
         selectedPaths,
         budgetChars,
-        []
+        [],
+        expandGraph
       );
     } catch (err) {
       return buildUnavailableSessionBrief(
@@ -880,7 +1159,8 @@ export function readSessionBrief(
       projectRow?.id ?? null,
       selectedPaths,
       budgetChars,
-      []
+      [],
+      expandGraph
     );
   } catch (err) {
     return buildUnavailableSessionBrief(
@@ -1438,13 +1718,6 @@ export class MemoryService implements IMemoryService {
   }
 
   /**
-   * Escapes LIKE pattern special characters (%, _, \)
-   */
-  private _escapeLikePattern(str: string): string {
-    return str.replace(/[\\%_]/g, "\\$&");
-  }
-
-  /**
    * Inspects a symbol in Muninn memory, returning its entity metadata,
    * incoming and outgoing dependencies, and linked observations.
    */
@@ -1457,45 +1730,11 @@ export class MemoryService implements IMemoryService {
     }
 
     const targetProjectId = projectId ?? this._currentProject.id;
-    const query = symbol.trim();
-
-    // 1. Try exact match
-    let entity = this._db
-      .prepare<[string, string], Entity>(
-        `SELECT id, project_id, entity_type, identifier, file_path
-         FROM entities
-         WHERE project_id = ? AND identifier = ?`
-      )
-      .get(targetProjectId, query);
-
-    const escapedQuery = this._escapeLikePattern(query);
-
-    // 2. Try suffix match (e.g. searching 'run' matches 'src/app.ts::run', or 'login' matches 'src/auth.ts::AuthManager.login')
-    // Supports matching class methods with canonical format <relPath>::<ClassName>.<methodName> (REV-005, REV-008, SEC-004)
-    if (!entity) {
-      entity = this._db
-        .prepare<[string, string, string], Entity>(
-          `SELECT id, project_id, entity_type, identifier, file_path
-           FROM entities
-           WHERE project_id = ? AND (identifier LIKE '%::' || ? ESCAPE '\\' OR identifier LIKE '%.' || ? ESCAPE '\\')
-           ORDER BY identifier ASC
-           LIMIT 1`
-        )
-        .get(targetProjectId, escapedQuery, escapedQuery);
-    }
-
-    // 3. Try prefix match or file_path match
-    if (!entity) {
-      entity = this._db
-        .prepare<[string, string, string], Entity>(
-          `SELECT id, project_id, entity_type, identifier, file_path
-           FROM entities
-           WHERE project_id = ? AND (identifier LIKE ? || '%' ESCAPE '\\' OR file_path = ?)
-           ORDER BY identifier ASC
-           LIMIT 1`
-        )
-        .get(targetProjectId, escapedQuery, query);
-    }
+    const entity = resolveEntityByIdentifier(
+      this._db,
+      targetProjectId,
+      symbol.trim()
+    );
 
     if (!entity) {
       return null;
@@ -1563,8 +1802,45 @@ export class MemoryService implements IMemoryService {
         outgoing,
         incoming,
       },
+      neighbors: collectNeighbors(
+        this._db,
+        entity,
+        DEFAULT_NEIGHBOR_DEPTH,
+        DEFAULT_NEIGHBOR_LIMIT
+      ),
       observations,
     };
+  }
+
+  /**
+   * Returns bounded, deterministic graph neighbors for an indexed symbol.
+   *
+   * Traversal follows stored `entity_dependencies` edges in both directions,
+   * groups them by direction and relation, and never returns the same entity
+   * twice. Depth is clamped to 1–2 (default 1) and the result limit to 1–50
+   * (default 20).
+   */
+  public neighbors(
+    identifier: string,
+    options?: NeighborOptions
+  ): SymbolNeighbors | null {
+    if (!identifier || typeof identifier !== "string" || !identifier.trim()) {
+      return null;
+    }
+    const entity = resolveEntityByIdentifier(
+      this._db,
+      this._currentProject.id,
+      identifier.trim()
+    );
+    if (!entity) {
+      return null;
+    }
+    return collectNeighbors(
+      this._db,
+      entity,
+      options?.depth,
+      options?.limit
+    );
   }
 
   /**
@@ -1579,6 +1855,7 @@ export class MemoryService implements IMemoryService {
       options?.paths,
       this._currentProject.root_path
     );
+    const expandGraph = options?.expandGraph !== false;
     try {
       return assembleSessionBrief(
         this._db,
@@ -1586,7 +1863,8 @@ export class MemoryService implements IMemoryService {
         this._currentProject.id,
         selectedPaths,
         budgetChars,
-        []
+        [],
+        expandGraph
       );
     } catch (err) {
       return buildUnavailableSessionBrief(

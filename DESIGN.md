@@ -33,7 +33,7 @@ flowchart TD
 - If no git repository is present, it falls back to the user's home profile at `~/.huginn/muninn.db`.
 - If the resolved path is not `:memory:`, `getDatabase` ensures the target directory exists by calling `fs.mkdirSync(dir, { recursive: true, mode: 0o700 })`, restricting filesystem permissions to the owner.
 
-#### One root for the database and the project record (ADR-49 / REQ-50)
+#### One root for the database and the project record (ADR-9 / REQ-3)
 
 The database **file** and the project **row** used to be resolved independently — the file from
 `process.cwd()`, the row from the caller's `rootPath` — so `muninn mcp run --project X` executed from a
@@ -373,15 +373,39 @@ opens an existing database read-only and closes it when the reader owns the conn
 - indexed symbols selected by up to 20 normalized project-relative file/directory paths (absolute
   in-project paths are accepted); selection queries existing `entities.file_path` values only and
   never walks the filesystem;
+- deduplicated related symbols from the stored dependency graph when `expandGraph` is enabled
+  (default `true`), using the same bounded traversal as `MemoryService.neighbors`; the related
+  section is omitted when expansion is disabled or no stored edges exist, with a note explaining an
+  empty expansion;
 - counts of all observations (including superseded), entities, and links for the project, using
   `null` rather than zero when the database could not be read;
 - explanatory notes for omitted or unavailable data.
 
 `renderSessionBrief` converts the brief to deterministic Markdown. The complete rendered output,
-including headings, notes, and truncation markers, is measured against `budgetChars` (positive integer,
-default 8,000, maximum 20,000); oversized output is visibly truncated, including for very small
-budgets. Paths escaping the project root and invalid budgets are rejected. All read-only failures are
-converted to an empty brief with unavailable counts and a cause note instead of being thrown.
+including headings, notes, related symbols, and truncation markers, is measured against `budgetChars`
+(positive integer, default 8,000, maximum 20,000); oversized output is visibly truncated, including
+for very small budgets. Paths escaping the project root and invalid budgets are rejected. All
+read-only failures are converted to an empty brief with unavailable counts and a cause note instead
+of being thrown.
+
+#### 9. `neighbors(identifier, { depth?, limit? }): SymbolNeighbors | null`
+
+Traverses the existing `entity_dependencies` graph from an entity resolved through the same exact,
+suffix, and prefix/path lookup tiers as `inspectSymbol`. The traversal is breadth-first and follows
+stored edges in both directions:
+
+- `depth` defaults to 1 and is clamped to at most 2; values below 1 fall back to the default.
+- `limit` defaults to 20 and is clamped to at most 50; it caps the total number of distinct
+  neighboring entities, excluding the starting entity.
+- A visited set prevents cycles, self-loops, and duplicate entities even when several relation types
+  or paths reach the same node.
+- Results are ordered deterministically: outgoing before incoming, then a fixed relation order
+  (`imports`, `calls`, `implements`, `extends`, `references`), then entity identifier and ID.
+- `groups` groups the neighbors by direction and relation; `neighbors` is the flat ordered view;
+  `truncated` reports that the limit stopped traversal early.
+
+No relation is inferred from names, paths, or proximity: an entity appears only when a stored edge
+reaches it. The traversal is shared by session-brief expansion and symbol inspection.
 
 ## 3. Muninn Memory Engine — Model Context Protocol (MCP) Server Architecture
 
@@ -488,6 +512,7 @@ export interface IMemoryService {
     symbol?: SymbolInput | string
   ): { observation: Observation; entity: Entity };
   inspectSymbol(symbol: string, projectId?: string): SymbolInspection | null;
+  neighbors(identifier: string, options?: NeighborOptions): SymbolNeighbors | null;
   getStats(projectId?: string): MemoryStats;
   getSessionBrief(options?: SessionBriefOptions): SessionBrief;
   syncToDisk(
@@ -533,8 +558,8 @@ The exported `MUNINN_TOOLS: Tool[]` array is dynamically generated from `TOOL_RE
 | `muninn_context` | `MuninnContextSchema` | - `limit`: Optional integer, 1–500, default: 20<br>- `category`: Optional category enum<br>- `topicKey`: Optional trimmed string, max 256 chars<br>- `allProjects`: Optional boolean<br>- `includeSuperseded` / `include_superseded`: Optional boolean, default `false` | `service.getContext(input)` |
 | `muninn_link_symbol` | `MuninnLinkSymbolSchema` | - `observationId`: Trimmed string, min 1 char<br>- `symbol`: String (min 1 char) or `SymbolSchema` object | `service.linkSymbol(input.observationId, input.symbol)` |
 | `muninn_stats` | `MuninnStatsSchema` | - `allProjects`: Optional boolean (default: false) | `service.getStats(allProjects ? undefined : currentProject.id)` |
-| `muninn_inspect_symbol` | `MuninnInspectSymbolSchema` | - `symbol`: Trimmed string, 1–2,000 chars<br>- `projectId` / `project_id`: Optional trimmed string | `service.inspectSymbol(symbol, projectId)` returning symbol definition, file location, incoming/outgoing dependencies, and linked observations |
-| `muninn_bootstrap` | `MuninnBootstrapSchema` | - `paths`: Optional array of 1–20 trimmed path strings (max 4,096 chars each)<br>- `budgetChars` / `budget_chars`: Optional positive integer, max 20,000, default 8,000 | Read-only `readSessionBrief` (default server) or `service.getSessionBrief` (injected service); returns the shared Markdown directly rather than JSON |
+| `muninn_inspect_symbol` | `MuninnInspectSymbolSchema` | - `symbol`: Trimmed string, 1–2,000 chars<br>- `projectId` / `project_id`: Optional trimmed string | `service.inspectSymbol(symbol, projectId)` returning symbol definition, file location, incoming/outgoing dependencies, a bounded depth-1 neighbor traversal, and linked observations |
+| `muninn_bootstrap` | `MuninnBootstrapSchema` | - `paths`: Optional array of 1–20 trimmed path strings (max 4,096 chars each)<br>- `budgetChars` / `budget_chars`: Optional positive integer, max 20,000, default 8,000<br>- `expandGraph` / `expand_graph`: Optional boolean, default `true` | Read-only `readSessionBrief` (default server) or `service.getSessionBrief` (injected service); returns the shared Markdown directly rather than JSON |
 | `muninn_verify_contract` | `MuninnVerifyContractSchema` | - `files`: Optional array of strings or single string (transformed to array), max 500 items, 1–1,000 chars per path<br>- `projectRoot` / `project_root`: Optional trimmed string (enforced inside permitted project root) | `verifyTypeScriptContracts(targetRoot, files)` returning `{ valid, errorsCount, diagnostics }` with line/column locations and visual code snippets |
 
 #### Symbol Schema Refinement (`SymbolSchema`)
@@ -1010,6 +1035,7 @@ export interface SymbolInspection {
     outgoing: SymbolInspectionDependency[];
     incoming: SymbolInspectionDependency[];
   };
+  neighbors: SymbolNeighbors; // bounded depth-1 traversal
   observations: Observation[];
 }
 ```
@@ -1022,5 +1048,5 @@ export interface SymbolInspection {
      ```
      Enables queries like `"login"` to find `"src/auth.ts::AuthManager.login"`.
   3. **Prefix / Path Match**: Matches namespaces or file paths (`identifier LIKE ? || '%' ESCAPE '\' OR file_path = ?`).
-- **SQL Injection Prevention (`_escapeLikePattern`)**: Escapes `%`, `_`, and `\` before binding to LIKE clauses.
-- **Graph & Observation Aggregation**: Fetches outgoing dependencies, incoming dependents, and all linked memory observations, returning a complete 360-degree topological view of the symbol.
+- **SQL Injection Prevention (`escapeLikePattern`)**: The module-level helper escapes `%`, `_`, and `\` before binding to LIKE clauses; `neighbors` reuses the same entity-resolution tiers through `resolveEntityByIdentifier`.
+- **Graph & Observation Aggregation**: Fetches outgoing dependencies, incoming dependents, a bounded depth-1 neighbor traversal from the same implementation as `neighbors`, and all linked memory observations, returning a complete 360-degree topological view of the symbol.

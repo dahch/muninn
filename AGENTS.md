@@ -32,7 +32,7 @@ Vitest default; the repository config sets a 20-second timeout.
 ### Architecture map
 
 - `src/db/` — SQLite connection, schema, database path resolution, project records.
-- `src/service/` — `MemoryService`; all storage and retrieval behavior belongs here.
+- `src/service/` — `MemoryService`: storage, retrieval, session brief, and graph-neighbor traversal.
 - `src/indexer/` — TypeScript/JavaScript AST extraction and dependency indexing.
 - `src/mcp/` — MCP server, tool registry, Zod schemas, argument normalization, bounded stdio.
 - `src/commands/` — CLI handlers for memory, MCP, and contract verification.
@@ -40,8 +40,7 @@ Vitest default; the repository config sets a 20-second timeout.
 - `src/util/` — terminal sanitization and path safety.
 
 Read [`DESIGN.md`](./DESIGN.md) before changing the storage schema, service transactions, MCP tool
-contract, or indexer. Read [`SPEC.md`](./SPEC.md) for current product behavior; it also lists features
-that are specified but not implemented.
+contract, or indexer. Read [`SPEC.md`](./SPEC.md) for current product behavior.
 
 ### Invariants
 
@@ -51,6 +50,9 @@ that are specified but not implemented.
 - Default `search` and `getContext` exclude superseded observations; `includeSuperseded` opts in.
 - Session bootstrap uses `getReadOnlyDatabase` / `readSessionBrief`: it must not create directories or
   files, run schema DDL/migrations, or insert a project row, and must fail open with a note.
+- Graph recovery traverses only stored `entity_dependencies` edges. Keep the default depth at 1, clamp
+  depth to 2 and the neighbor limit to 50, deduplicate entities, and use the same traversal for briefs
+  and symbol inspection; never infer edges from names or paths.
 - Every MCP input is validated with Zod after `normalizeArgs`; keep camelCase and snake_case aliases
   consistent.
 - Protected database and JSONL paths go through `assertDocPath`; do not bypass symlink or containment
