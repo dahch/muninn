@@ -1,4 +1,7 @@
-node_modules/
+# No trailing slash: a sandboxed run symlinks `node_modules` into a worktree,
+# and `node_modules/` alone does NOT match a symlink (only a directory), so the
+# link got staged, committed and then checked out over the real tree.
+node_modules
 dist/
 coverage/
 *.log
@@ -6,6 +9,7 @@ coverage/
 *.db-wal
 *.db-shm
 .huginn/
+.harness/
 .env
 .env.*
 # npm is canonical here (package-lock.json is tracked); a pnpm install's lockfile
