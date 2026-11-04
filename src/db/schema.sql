@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS observations (
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   topic_key TEXT,
+  status TEXT CHECK(status IN ('active', 'superseded')) NOT NULL DEFAULT 'active',
+  superseded_by TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE

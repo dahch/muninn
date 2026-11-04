@@ -83,6 +83,18 @@ export const MuninnSaveSchema = z.object({
     .max(256, "Topic key cannot exceed 256 characters")
     .nullish()
     .describe("Optional clustering key to group related observations (e.g. auth, db)"),
+  supersedesTopicKey: z
+    .string()
+    .trim()
+    .max(256, "Supersedes topic key cannot exceed 256 characters")
+    .nullish()
+    .describe("Optional topic key whose active decisions this new decision replaces"),
+  supersedes_topic_key: z
+    .string()
+    .trim()
+    .max(256, "Supersedes topic key cannot exceed 256 characters")
+    .nullish()
+    .describe("Optional topic key whose active decisions this new decision replaces (snake_case)"),
   symbols: z
     .array(z.union([z.string().trim().min(1), SymbolSchema]))
     .max(500, "Symbols array cannot exceed 500 items")
@@ -115,6 +127,14 @@ export const MuninnSearchSchema = z.object({
     .boolean()
     .nullish()
     .describe("Whether to search across all projects (default false)"),
+  includeSuperseded: z
+    .boolean()
+    .nullish()
+    .describe("Whether to include superseded observations (default false)"),
+  include_superseded: z
+    .boolean()
+    .nullish()
+    .describe("Whether to include superseded observations (default false, snake_case)"),
 });
 
 export type MuninnSearchInput = z.infer<typeof MuninnSearchSchema>;
@@ -142,6 +162,14 @@ export const MuninnContextSchema = z.object({
     .boolean()
     .nullish()
     .describe("Whether to query across all projects (default false)"),
+  includeSuperseded: z
+    .boolean()
+    .nullish()
+    .describe("Whether to include superseded observations (default false)"),
+  include_superseded: z
+    .boolean()
+    .nullish()
+    .describe("Whether to include superseded observations (default false, snake_case)"),
 });
 
 export type MuninnContextInput = z.infer<typeof MuninnContextSchema>;
@@ -420,6 +448,18 @@ export function normalizeArgs(
     normalized.projectRoot === undefined
   ) {
     normalized.projectRoot = normalized.project_root;
+  }
+  if (
+    normalized.supersedes_topic_key !== undefined &&
+    normalized.supersedesTopicKey === undefined
+  ) {
+    normalized.supersedesTopicKey = normalized.supersedes_topic_key;
+  }
+  if (
+    normalized.include_superseded !== undefined &&
+    normalized.includeSuperseded === undefined
+  ) {
+    normalized.includeSuperseded = normalized.include_superseded;
   }
   if (normalized.file !== undefined && normalized.files === undefined) {
     normalized.files = normalized.file;

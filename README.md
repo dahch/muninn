@@ -10,10 +10,13 @@ engine as a plain Node/Bun library and a CLI.
 It used to live inside [Huginn](https://github.com/dahch/huginn); it is now an independent
 package with no dependency on the orchestrator.
 
-## What it gives you
+## Overview
 
 - **Observations with categories** — `decision`, `convention`, `discovery`, `bugfix`,
   `architecture` — searchable with SQLite **FTS5 + BM25** ranking.
+- **Decision supersession** — saving a decision with `supersedesTopicKey` atomically marks the
+  project's active decisions with that topic key as `superseded`, linking each to its replacement.
+  Search and context hide superseded observations by default; pass `includeSuperseded` to see them.
 - **A symbol graph** — the TypeScript Compiler API extracts files, functions, classes,
   interfaces and modules from your sources, plus the `imports`/`calls`/`extends`/`implements`/
   `references` edges between them, and links observations to symbols.
@@ -25,7 +28,13 @@ package with no dependency on the orchestrator.
 - **Local-first and self-contained** — no embeddings, no network, no server: one SQLite file
   and one process.
 
-## Install
+## Prerequisites
+
+- Node.js 20 or newer (the published package also runs under Bun)
+- A C/C++ toolchain for `better-sqlite3`'s native module when a prebuilt binary is unavailable
+- Git only if you want repository discovery and sanitized remote metadata; Muninn works outside a repository
+
+## Getting Started
 
 ```sh
 npm install -g @dahch/muninn     # CLI + MCP server
@@ -33,7 +42,13 @@ npm install -g @dahch/muninn     # CLI + MCP server
 npm install @dahch/muninn
 ```
 
-Requires Node.js >= 20 (or Bun).
+From a checkout, install the locked dependencies and initialize memory for this repository:
+
+```sh
+npm ci
+npm run build
+node dist/cli.js memory init --project .
+```
 
 ## CLI
 
@@ -76,6 +91,33 @@ Huginn's `huginn setup` writes this for you in every runtime it knows about.
 muninn mcp run --project .
 ```
 
+The `muninn_save` tool accepts `supersedesTopicKey` / `supersedes_topic_key`, and
+`muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`. Existing
+calls keep working: replacement is opt-in and retrieval excludes superseded observations by
+default.
+
+## Architecture
+
+Muninn is one `MemoryService` core with three adapters: the CLI, the MCP stdio server, and the
+library. Storage is a single embedded SQLite database with FTS5. The AST indexer writes through the
+service/database boundary; contract verification is a separate read-only TypeScript pass.
+
+```mermaid
+flowchart LR
+    Agent["MCP-capable agent"] -->|stdio JSON-RPC| MCP["MCP server\nmuninn mcp run"]
+    CLI["CLI\nmuninn ..."] --> Service["MemoryService"]
+    Library["Node/Bun library"] --> Service
+    MCP --> Service
+    Service --> DB[("SQLite + FTS5\n.huginn/muninn.db")]
+    Service <--> JSONL["JSONL export/import\n.huginn/memories.jsonl"]
+    Indexer["AST indexer\nTypeScript Compiler API"] --> Service
+    CLI --> Verifier["Contract verifier\nTypeScript Compiler API"]
+    MCP --> Verifier
+```
+
+See [`DESIGN.md`](./DESIGN.md) for the schema, service transactions, MCP validation pipeline, CLI
+parsing, contract verifier and indexer internals.
+
 ## Library
 
 ```ts
@@ -87,7 +129,23 @@ memory.saveObservation({
   category: "decision",
   title: "Auth is a port",
   content: "Tokens are validated behind an AuthPort so the transport can change.",
+  topicKey: "auth-boundary",
   symbols: ["src/auth/port.ts"],
+});
+
+// Replaces earlier active decisions with the same topic key in this project.
+memory.saveObservation({
+  category: "decision",
+  title: "Auth is a middleware boundary",
+  content: "Tokens are validated in middleware before any handler runs.",
+  topicKey: "auth-boundary",
+  supersedesTopicKey: "auth-boundary",
+});
+
+// Superseded decisions are hidden unless explicitly requested.
+const history = memory.search({
+  query: "token validation",
+  includeSuperseded: true,
 });
 
 indexFilesIntoMuninn(memory, ["src/auth/port.ts"], { projectRoot: process.cwd() });
@@ -111,6 +169,16 @@ Subpath entry points are available for narrower imports:
 | `@dahch/muninn/contracts` | TypeScript contract verification |
 | `@dahch/muninn/util` | terminal-text sanitizer |
 
+## Environment Variables
+
+Muninn has no required environment variables. Configuration is passed as CLI flags or
+`MemoryService` options.
+
+| Variable | Type | Default | Purpose |
+|---|---|---|---|
+| `MUNINN_DEBUG` | string (presence is enough) | unset | Emit `[muninn] mcp run` lifecycle diagnostics on stderr, including stdin-close shutdown messages. |
+| `HUGINN_DEBUG` | string (presence is enough) | unset | Legacy alias for `MUNINN_DEBUG`, retained for Huginn compatibility. |
+
 ## Security notes
 
 - Every path Muninn writes to — the SQLite file and the JSONL export — is screened: a symlink on
@@ -120,19 +188,25 @@ Subpath entry points are available for narrower imports:
 - The MCP stdio transport is bounded and survives a dead parent instead of crashing or hanging.
 - MCP tool inputs are validated with zod; unknown tools and bad arguments fail closed.
 
-## Development
-
-The design of the engine — SQLite/FTS5 schema, service core, MCP server, CLI, contract verifier and
-AST indexer — is documented in [`DESIGN.md`](./DESIGN.md), moved here from the orchestrator's design
-document when Muninn became its own package.
+## Available Scripts
 
 ```sh
-npm ci
+npm run dev        # run src/cli.ts directly with Bun
 npm run build      # tsc -> dist/ (+ schema.sql, +x cli.js)
 npm test           # vitest run (storage, service, indexer, MCP, CLI)
+npm run test:watch # vitest in watch mode
 npm run typecheck  # tsc --noEmit
-bun run src/cli.ts memory init --project .
+npm run prepublishOnly  # build + test + typecheck (npm lifecycle hook)
 ```
+
+Run the built CLI without installing it globally:
+
+```sh
+node dist/cli.js memory init --project .
+node dist/cli.js memory search "auth boundary" --project .
+```
+
+### Releasing
 
 Publishing is tag-driven, but only once the package exists. The **first** publish is manual, from a
 logged-in machine, because npm's trusted publishing attaches to a package page that has to exist first:
@@ -146,7 +220,38 @@ After that, configure the trusted publisher on npm (repository `dahch/muninn`, w
 `publish.yml`) and tagged releases need no token at all: `git tag v0.1.1 && git push origin v0.1.1`
 runs the workflow, which checks the tag against `package.json`, builds, tests and publishes over
 OIDC. A run whose version is already on npm skips the publish step and refreshes the GitHub release
-instead, so re-tagging to fix a message stays safe.
+instead, so re-tagging to fix a message stays safe. The release job copies the matching version
+section from [`CHANGELOG.md`](./CHANGELOG.md).
+
+## Project Structure
+
+```text
+src/
+  cli.ts                 argument parsing, command routing, process entry point
+  commands/              memory (init/search/sync/index), mcp run, check
+  db/                    SQLite client, schema.sql, path and project resolution
+  service/               MemoryService: save, search, context, links, sync, stats
+  indexer/               TypeScript/JavaScript AST symbol and dependency extraction
+  mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
+  contracts/             in-process TypeScript contract verification
+  util/                  terminal-text sanitizer and path-safety helpers
+test/                    Vitest integration suites for db, service, indexer, MCP, CLI, contracts
+```
+
+## Documentation
+
+- [`SPEC.md`](./SPEC.md) — product behaviour, domain model, use cases and constraints.
+- [`DESIGN.md`](./DESIGN.md) — technical design, schema, data flow and internals.
+- [`ADR.md`](./ADR.md) — architecture decision records, including which decisions are not yet implemented.
+- [`CHANGELOG.md`](./CHANGELOG.md) — release notes.
+- [`AGENTS.md`](./AGENTS.md) — repository conventions for coding agents; no `.opencode/agents/` are defined.
+
+## Contributing
+
+Keep changes aligned with the current contract: update both `src/db/schema.sql` and the `SCHEMA_SQL`
+fallback in `src/db/client.ts`, add or update a Vitest suite under `test/`, and run
+`npm run build && npm test && npm run typecheck` before opening a pull request. Add a new ADR for a
+new architectural decision instead of rewriting an existing one.
 
 ## License
 

@@ -64,6 +64,8 @@ export interface SaveObservationInput {
   content: string;
   topicKey?: string | null;
   topic_key?: string | null;
+  supersedesTopicKey?: string | null;
+  supersedes_topic_key?: string | null;
   projectId?: string;
   project_id?: string;
   symbols?: Array<SymbolInput | string> | null;
@@ -75,6 +77,8 @@ export interface SearchOptions {
   projectId?: string | null;
   project_id?: string | null;
   allProjects?: boolean | null;
+  includeSuperseded?: boolean | null;
+  include_superseded?: boolean | null;
   limit?: number | null;
 }
 
@@ -90,6 +94,8 @@ export interface ContextOptions {
   projectId?: string | null;
   project_id?: string | null;
   allProjects?: boolean | null;
+  includeSuperseded?: boolean | null;
+  include_superseded?: boolean | null;
 }
 
 export interface SyncToDiskOptions {
@@ -394,6 +400,10 @@ export class MemoryService implements IMemoryService {
       input.topicKey !== undefined
         ? input.topicKey
         : (input.topic_key ?? null);
+    const supersedesTopicKey =
+      input.supersedesTopicKey !== undefined
+        ? input.supersedesTopicKey
+        : (input.supersedes_topic_key ?? null);
     const observationId = crypto.randomUUID();
 
     return this._db.transaction(() => {
@@ -410,6 +420,27 @@ export class MemoryService implements IMemoryService {
           input.content,
           topicKey
         );
+
+      // Explicit decision replacement is part of the same transaction: either
+      // the new decision and every supersession link commit together or not at
+      // all. Exclude the new row so it never supersedes itself.
+      if (
+        category === "decision" &&
+        supersedesTopicKey !== undefined &&
+        supersedesTopicKey !== null
+      ) {
+        this._db
+          .prepare(
+            `UPDATE observations
+             SET status = 'superseded', superseded_by = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE project_id = ?
+               AND category = 'decision'
+               AND topic_key = ?
+               AND status = 'active'
+               AND id != ?`
+          )
+          .run(observationId, projectId, supersedesTopicKey, observationId);
+      }
 
       const symbols = input.symbols ?? [];
       const selectEntityStmt = this._db.prepare<[string, string], Entity>(
@@ -454,7 +485,7 @@ export class MemoryService implements IMemoryService {
 
       const observation = this._db
         .prepare<[string], Observation>(
-          `SELECT id, project_id, category, title, content, topic_key, created_at, updated_at
+          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
            FROM observations
            WHERE id = ?`
         )
@@ -551,6 +582,10 @@ export class MemoryService implements IMemoryService {
       params.push(options.category);
     }
 
+    if (!options.includeSuperseded && !options.include_superseded) {
+      conditions.push("o.status = 'active'");
+    }
+
     if (!options?.allProjects) {
       const explicitProjectId =
         options?.projectId !== undefined
@@ -581,6 +616,8 @@ export class MemoryService implements IMemoryService {
         o.title,
         o.content,
         o.topic_key,
+        o.status,
+        o.superseded_by,
         o.created_at,
         o.updated_at,
         bm25(observations_fts) AS rank
@@ -632,6 +669,8 @@ export class MemoryService implements IMemoryService {
       title: r.title,
       content: r.content,
       topic_key: r.topic_key,
+      status: r.status,
+      superseded_by: r.superseded_by,
       created_at: r.created_at,
       updated_at: r.updated_at,
       rank: r.rank,
@@ -649,6 +688,10 @@ export class MemoryService implements IMemoryService {
     if (options?.category) {
       conditions.push("category = ?");
       params.push(options.category);
+    }
+
+    if (!options?.includeSuperseded && !options?.include_superseded) {
+      conditions.push("status = 'active'");
     }
 
     const topicKey =
@@ -683,7 +726,7 @@ export class MemoryService implements IMemoryService {
     params.push(limit);
 
     const sql = `
-      SELECT id, project_id, category, title, content, topic_key, created_at, updated_at
+      SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
       FROM observations
       ${whereClause}
       ORDER BY updated_at DESC, created_at DESC
@@ -706,6 +749,8 @@ export class MemoryService implements IMemoryService {
       title: r.title,
       content: r.content,
       topic_key: r.topic_key,
+      status: r.status,
+      superseded_by: r.superseded_by,
       created_at: r.created_at,
       updated_at: r.updated_at,
       entities: entityMap.get(r.id) ?? [],
@@ -744,7 +789,7 @@ export class MemoryService implements IMemoryService {
 
     const observation = this._db
       .prepare<[string], Observation>(
-        `SELECT id, project_id, category, title, content, topic_key, created_at, updated_at
+        `SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
          FROM observations
          WHERE id = ?`
       )
@@ -916,7 +961,7 @@ export class MemoryService implements IMemoryService {
     // Fetch linked observations
     const observations = this._db
       .prepare<[string], Observation>(
-        `SELECT o.id, o.project_id, o.category, o.title, o.content, o.topic_key, o.created_at, o.updated_at
+        `SELECT o.id, o.project_id, o.category, o.title, o.content, o.topic_key, o.status, o.superseded_by, o.created_at, o.updated_at
          FROM observations o
          JOIN observation_entities oe ON oe.observation_id = o.id
          WHERE oe.entity_id = ?
@@ -1062,7 +1107,7 @@ export class MemoryService implements IMemoryService {
     if (options?.allProjects === true) {
       observations = this._db
         .prepare<[], Observation>(
-          `SELECT id, project_id, category, title, content, topic_key, created_at, updated_at
+          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
            FROM observations
            ORDER BY created_at ASC`
         )
@@ -1079,7 +1124,7 @@ export class MemoryService implements IMemoryService {
     } else {
       observations = this._db
         .prepare<[string], Observation>(
-          `SELECT id, project_id, category, title, content, topic_key, created_at, updated_at
+          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
            FROM observations
            WHERE project_id = ?
            ORDER BY created_at ASC`
@@ -1197,8 +1242,8 @@ export class MemoryService implements IMemoryService {
         "SELECT id FROM projects WHERE id = ?"
       );
       const insertObsStmt = this._db.prepare(
-        `INSERT INTO observations (id, project_id, category, title, content, topic_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO observations (id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       const findEntityStmt = this._db.prepare<[string, string], Entity>(
         `SELECT id, project_id, entity_type, identifier, file_path
@@ -1259,6 +1304,9 @@ export class MemoryService implements IMemoryService {
             : (record.topicKey ?? null);
         const createdAt = record.created_at ?? new Date().toISOString();
         const updatedAt = record.updated_at ?? createdAt;
+        const status = record.status === "superseded" ? "superseded" : "active";
+        const supersededBy =
+          record.superseded_by ?? record.supersededBy ?? null;
 
         insertObsStmt.run(
           record.id,
@@ -1267,6 +1315,8 @@ export class MemoryService implements IMemoryService {
           record.title,
           record.content,
           topicKey,
+          status,
+          supersededBy,
           createdAt,
           updatedAt
         );

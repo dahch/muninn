@@ -1,14 +1,14 @@
 # Muninn — Technical Design
 
-This is the design of the memory engine, moved from the orchestrator's `DESIGN.md` (its sections 13–18)
-when Muninn became its own package. Paths were rewritten to this repository's layout: `src/db/`,
-`src/service/`, `src/indexer/`, `src/mcp/`, `src/contracts/` and `src/commands/`, with the tests under
-`test/`.
+This is the design of the memory engine extracted from the orchestrator's `DESIGN.md` (its sections
+13–18). Paths were rewritten to this repository's layout: `src/db/`, `src/service/`, `src/indexer/`,
+`src/mcp/`, `src/contracts/` and `src/commands/`, with the tests under `test/`.
 
-Two conventions carried over unchanged: the database lives at `<git-root>/.huginn/muninn.db` (the data
-directory belongs to the orchestrator too, and both read and write the same file), and the MCP server
-is the integration surface agents use. The `huginn memory`, `huginn check` and `huginn mcp run`
-commands are thin wrappers over this package.
+Muninn is now an independent package: the `muninn` CLI, the MCP server, and the library all live in
+this repository. Two conventions carried over unchanged: the database lives at
+`<git-root>/.huginn/muninn.db`, and the MCP server is the integration surface agents use. Huginn can
+still embed the package, but no orchestrator code is required to build, test, or run Muninn; there are
+no `huginn memory`, `huginn check`, or `huginn mcp run` wrappers in this repository.
 
 ## 1. Muninn Memory Engine — Database Layer & SQLite FTS5 Schema
 
@@ -54,13 +54,13 @@ working directory inside `Y` labelled a row in **Y's** database. Both now come f
   applies the same screen to the durable JSONL export in **both** directions (`syncToDisk` writes,
   `importFromDisk` reads), because a readable foreign `memories.jsonl` would be served to the agent
   through the MCP memory tools (SEC-006).
-- **Diagnosis, not repair**: `huginn doctor`'s non-critical `muninn-attribution` check lists `projects`
-  rows whose `root_path` is not the project root, comparing `realpath`ed paths so a symlink alias (or
-  macOS `/tmp` vs `/private/tmp`) is not a false positive, and deletes nothing.
+- **Diagnosis, not repair**: This package has no doctor command. Attribution diagnostics belong to
+  an embedding orchestrator and are not part of the Muninn CLI; Muninn itself never rewrites an
+  existing `projects.root_path`.
 
 ### SQLite Connection & PRAGMA Configuration
 
-Every connection initialized via `getDatabase(dbPath?)` instantiates a `better-sqlite3` instance with a 5000ms connection timeout and configures four essential pragmas before executing migrations:
+Every connection initialized via `getDatabase(dbPath?, startDir?)` instantiates a `better-sqlite3` instance with a 5000ms connection timeout and configures four essential pragmas before executing migrations:
 
 ```ts
 db.pragma("foreign_keys = ON");
@@ -77,6 +77,8 @@ db.pragma("recursive_triggers = ON");
 | `recursive_triggers = ON` | Enables cascading deletes to activate triggers on child tables. **Crucial for FTS5 consistency**: when a project is deleted, cascade deletion removes rows in `observations`; `recursive_triggers = ON` ensures the `obs_ad` trigger fires and deletes the corresponding records from `observations_fts`. |
 
 If pragma initialization or DDL execution throws an exception, `getDatabase` immediately closes the database handle before re-throwing, ensuring no leaked file descriptors or locks.
+
+After the DDL runs, `getDatabase` inspects `PRAGMA table_info(observations)` and adds only the missing lifecycle columns with `ALTER TABLE` (`status` defaulting to `active`, and nullable `superseded_by`). The migration is idempotent and never recreates tables or changes the existing FTS triggers.
 
 ### Schema & Entity-Relationship Design
 
@@ -106,6 +108,8 @@ erDiagram
         text title
         text content
         text topic_key
+        text status
+        text superseded_by
         datetime created_at
         datetime updated_at
     }
@@ -145,6 +149,7 @@ erDiagram
    - `project_id TEXT NOT NULL` with `FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE`.
    - `category TEXT NOT NULL` constrained by `CHECK(category IN ('decision', 'convention', 'discovery', 'bugfix', 'architecture'))`.
    - `title TEXT NOT NULL`, `content TEXT NOT NULL`, `topic_key TEXT`.
+   - `status TEXT NOT NULL DEFAULT 'active'` constrained to `active` or `superseded`, plus nullable `superseded_by TEXT` linking to the replacing observation.
    - Timestamps `created_at` and `updated_at`.
    - Indexes: `idx_observations_project_id`, `idx_observations_updated_at`, and `idx_observations_project_updated ON observations(project_id, updated_at DESC, created_at DESC)`.
 
@@ -183,7 +188,8 @@ erDiagram
 ### Project Bootstrapping & Credential Sanitization
 
 - **`ensureProject(db, options?)`**:
-  - Resolves `rootPath` from options, nearest `.git` root, or `process.cwd()`.
+  - Resolves `rootPath` from `options.rootPath`, or from the nearest `.git` root of
+    `options.startDir` (falling back to `process.cwd()` when no `startDir` is supplied).
   - Performs an idempotent query `SELECT ... FROM projects WHERE root_path = ?`. If found, returns the existing record.
   - If not found, generates a UUID, extracts project name (from directory basename or fallback `"project"`), reads origin URL from `.git/config` using `tryGetGitRemote`, and inserts the new project record.
 - **`sanitizeGitRemote(rawUrl)`**:
@@ -231,7 +237,7 @@ flowchart TD
 
 #### 1. `saveObservation(input: SaveObservationInput): ObservationWithEntities`
 
-Creates a new observation and links code symbols in a single atomic transaction (`db.transaction`):
+Creates a new observation and links code symbols in a single atomic transaction (`db.transaction`). When the new category is `decision` and `supersedesTopicKey` (or `supersedes_topic_key`) is supplied, the same transaction also marks matching active decisions in the same project as `superseded` and sets `superseded_by` to the new observation ID. Other categories, other projects, other topic keys, and already-superseded rows are left unchanged, and the new row never supersedes itself.
 
 ```mermaid
 sequenceDiagram
@@ -240,12 +246,15 @@ sequenceDiagram
     participant DB as SQLite DB
     participant T as FTS5 Triggers
 
-    C->>S: saveObservation(category, title, content, symbols)
+    C->>S: saveObservation(category, title, content, topic_key?, supersedesTopicKey?, symbols)
     Note over S: Validate category against VALID_CATEGORIES
     Note over S: Verify title & content are non-empty strings
     S->>DB: BEGIN TRANSACTION
     S->>DB: INSERT INTO observations (id, project_id, category, title, content, topic_key)
     DB-->>T: obs_ai trigger fires to update observations_fts
+    opt category is decision and supersedesTopicKey supplied
+        S->>DB: UPDATE observations SET status = 'superseded', superseded_by = new id WHERE same project, decision, matching topic key, active, id != new id
+    end
     loop For each symbol
         Note over S: normalizeSymbol(symbol)
         S->>DB: SELECT id FROM entities WHERE project_id AND identifier
@@ -263,7 +272,8 @@ sequenceDiagram
 - **Category Validation**: Must match one of `VALID_CATEGORIES` (`"decision"`, `"convention"`, `"discovery"`, `"bugfix"`, `"architecture"`). Throws an error for invalid categories.
 - **Symbol Normalization (`normalizeSymbol`)**: Accepts string shorthand (`"src/db.ts::connect"`, `"src/config.ts"`, `"myFunc"`) or structured objects (`{ name, filePath, type, identifier }`). Generates canonical identifiers, resolves file paths, and assigns entity types (`file`, `function`, `class`, `interface`, `module`).
 - **Entity Deduplication**: Identical normalized symbols within the same observation input are deduplicated before insertion.
-- **Transaction Safety**: Insertion of the observation row, creation of new entities, and linking in `observation_entities` are completely atomic.
+- **Transaction Safety**: Insertion of the observation row, any explicit decision supersession, creation of new entities, and linking in `observation_entities` are completely atomic.
+- **Lifecycle Result**: Returned observations expose `status` and `superseded_by` alongside the existing fields.
 
 #### 2. `search(options: SearchOptions): SearchResult[]`
 
@@ -277,6 +287,7 @@ Executes BM25 full-text keyword searches across observations:
 - **Relevance Ranking**: Results are ordered by `bm25(observations_fts) ASC` (in SQLite FTS5 BM25, lower scores indicate higher relevance).
 - **Project Scoping**: Searches default to `currentProject.id`. Scoping can be overridden with an explicit `projectId` / `project_id`, or expanded globally with `allProjects: true`.
 - **Entity Attachment**: Hydrates linked entities for all matching observations via `_fetchEntitiesForObservations`.
+- **Lifecycle Filter**: Excludes `superseded` observations at query time by default. `includeSuperseded: true` includes both statuses and results expose `status` and `superseded_by`.
 - **Limit Clamping**: Limits are clamped between `1` and `500` (default: `10`).
 
 #### 3. `getContext(options?: ContextOptions): ObservationWithEntities[]`
@@ -286,6 +297,7 @@ Retrieves recent observations for context window injection:
 - **Chronological Ordering**: Ordered by `updated_at DESC, created_at DESC`.
 - **Performance Optimization**: Accelerated by the compound index `idx_observations_project_updated ON observations(project_id, updated_at DESC, created_at DESC)`.
 - **Filters**: Supports filtering by `category`, `topicKey` / `topic_key`, and `projectId` / `project_id` (or `allProjects: true`).
+- **Lifecycle Filter**: Excludes `superseded` observations at query time by default. `includeSuperseded: true` includes both statuses and exposes `status` and `superseded_by`.
 - **Chunked Entity Fetching (`_fetchEntitiesForObservations`)**:
   - Joins between observations and entities are loaded in batches of at most 500 observation IDs at a time (`WHERE oe.observation_id IN (?, ?, ...)`).
   - This avoids exceeding SQLite host parameter limits (`SQLITE_LIMIT_VARIABLE_NUMBER`) even when requesting up to 500 observations.
@@ -439,6 +451,7 @@ export interface IMemoryService {
     inputOrObsId: LinkSymbolInput | string,
     symbol?: SymbolInput | string
   ): { observation: Observation; entity: Entity };
+  inspectSymbol(symbol: string, projectId?: string): SymbolInspection | null;
   getStats(projectId?: string): MemoryStats;
   syncToDisk(
     targetPath?: string,
@@ -459,7 +472,7 @@ Instead of imperative `switch/case` routing, tools are declared in a centralized
 
 ```ts
 export interface ToolDefinition<
-  TSchema extends z.ZodTypeAny = z.ZodTypeAny,
+  TSchema extends z.ZodTypeAny = any,
   TOutput = unknown
 > {
   name: string;
@@ -478,9 +491,9 @@ The exported `MUNINN_TOOLS: Tool[]` array is dynamically generated from `TOOL_RE
 
 | Tool | Schema | Bounds & Validation Constraints | Handler Action |
 |---|---|---|---|
-| `muninn_save` | `MuninnSaveSchema` | - `category`: Enum (`decision`, `convention`, `discovery`, `bugfix`, `architecture`)<br>- `title`: Trimmed string, 1–1,000 chars<br>- `content`: Trimmed string, 1–1,000,000 chars<br>- `topicKey`: Optional trimmed string, max 256 chars<br>- `symbols`: Optional array, max 500 items (string or `SymbolSchema`) | `service.saveObservation(input)` |
-| `muninn_search` | `MuninnSearchSchema` | - `query`: Trimmed string, 1–2,000 chars<br>- `category`: Optional category enum<br>- `limit`: Optional integer, 1–500, default: 10<br>- `allProjects`: Optional boolean | `service.search(input)` |
-| `muninn_context` | `MuninnContextSchema` | - `limit`: Optional integer, 1–500, default: 20<br>- `category`: Optional category enum<br>- `topicKey`: Optional trimmed string, max 256 chars<br>- `allProjects`: Optional boolean | `service.getContext(input)` |
+| `muninn_save` | `MuninnSaveSchema` | - `category`: Enum (`decision`, `convention`, `discovery`, `bugfix`, `architecture`)<br>- `title`: Trimmed string, 1–1,000 chars<br>- `content`: Trimmed string, 1–1,000,000 chars<br>- `topicKey`: Optional trimmed string, max 256 chars<br>- `supersedesTopicKey` / `supersedes_topic_key`: Optional trimmed string, max 256 chars<br>- `symbols`: Optional array, max 500 items (string or `SymbolSchema`) | `service.saveObservation(input)` |
+| `muninn_search` | `MuninnSearchSchema` | - `query`: Trimmed string, 1–2,000 chars<br>- `category`: Optional category enum<br>- `limit`: Optional integer, 1–500, default: 10<br>- `allProjects`: Optional boolean<br>- `includeSuperseded` / `include_superseded`: Optional boolean, default `false` | `service.search(input)` |
+| `muninn_context` | `MuninnContextSchema` | - `limit`: Optional integer, 1–500, default: 20<br>- `category`: Optional category enum<br>- `topicKey`: Optional trimmed string, max 256 chars<br>- `allProjects`: Optional boolean<br>- `includeSuperseded` / `include_superseded`: Optional boolean, default `false` | `service.getContext(input)` |
 | `muninn_link_symbol` | `MuninnLinkSymbolSchema` | - `observationId`: Trimmed string, min 1 char<br>- `symbol`: String (min 1 char) or `SymbolSchema` object | `service.linkSymbol(input.observationId, input.symbol)` |
 | `muninn_stats` | `MuninnStatsSchema` | - `allProjects`: Optional boolean (default: false) | `service.getStats(allProjects ? undefined : currentProject.id)` |
 | `muninn_inspect_symbol` | `MuninnInspectSymbolSchema` | - `symbol`: Trimmed string, 1–2,000 chars<br>- `projectId` / `project_id`: Optional trimmed string | `service.inspectSymbol(symbol, projectId)` returning symbol definition, file location, incoming/outgoing dependencies, and linked observations |
@@ -517,7 +530,7 @@ export const SymbolSchema = z
    - LLMs frequently serialize optional omitted tool fields as explicit `null` or `undefined`.
    - `normalizeArgs` strips nullish entries before passing to Zod schemas, preventing unintended validation rejections.
 3. **Snake_Case Alias Translation**:
-   - Seamlessly remaps `topic_key` -> `topicKey`, `observation_id` -> `observationId`, and `all_projects` -> `allProjects`.
+   - Seamlessly remaps `topic_key` -> `topicKey`, `observation_id` -> `observationId`, `all_projects` -> `allProjects`, `project_id` -> `projectId`, `project_root` -> `projectRoot`, `supersedes_topic_key` -> `supersedesTopicKey`, `include_superseded` -> `includeSuperseded`, and `file` -> `files`.
 4. **Defensive Argument Extraction**:
    - Argument access and normalization are wrapped in `try...catch` within the tool call request handler, ensuring malformed non-object JSON payloads cannot throw unhandled exceptions.
 5. **Human-Readable Error Formatting (`formatZodErrors`)**:
@@ -546,10 +559,9 @@ flowchart TD
     DISPATCH -- "memory" --> MEM["handleMemoryCommand(subcommand, args, positionals)"]
     DISPATCH -- "mcp" --> MCP["handleMcpCommand(subcommand, args)"]
     DISPATCH -- "check" --> CHK["handleCheckCommand(files, args)"]
-    DISPATCH -- "run / plan / live / install" --> CORE["Core Harness Engines"]
 
     MEM --> SUBCMD{"subcommand"}
-    SUBCMD -- "init" --> INIT["MemoryService.init / ensureProject"]
+    SUBCMD -- "init" --> INIT["new MemoryService / ensureProject"]
     SUBCMD -- "search" --> SRCH["MemoryService.search() (BM25)"]
     SUBCMD -- "sync" --> SYNC["MemoryService.syncToDisk() / importFromDisk()"]
     SUBCMD -- "index" --> IDX["indexFilesIntoMuninn()"]
@@ -568,12 +580,12 @@ flowchart TD
    - Rather than retaining only the first non-command token in `_positional`, `parseArgs` populates `_positionals: string[]`.
    - The first positional argument after the command name determines the subcommand (`init`, `search`, `sync`, `index`, `run`), while remaining entries (`positionals.slice(1)`) are forwarded as positional arguments (such as search queries or file paths).
 2. **Boolean Flag Protection (`BOOLEAN_FLAGS`)**:
-   - A dedicated `Set` flags boolean parameters (`--yes`, `--force`, `--resume`, `--force-restart`, `--ignore-plan-changes`, `--tui`, `--headless`, `--import`, `--help`, `-h`).
-   - For any flag in `BOOLEAN_FLAGS`, the parser assigns `true` immediately without consuming the next token, preventing flags like `--import` from consuming subsequent positional file paths.
+   - A dedicated `Set` flags boolean parameters (`-h`, `--help`, `-v`, `--version`, `--import`, `--json`, `--quiet`).
+   - For any flag in `BOOLEAN_FLAGS`, the parser assigns `true` immediately without consuming the next token, preventing flags like `--import` from consuming subsequent positional file paths. Only `--import` currently changes command behavior; `--json` and `--quiet` are parsed but unused.
 3. **Keyword Disambiguation & Anti-Shadowing**:
    - By partitioning command arguments through `_positionals`, user search queries matching subcommands (e.g. `muninn memory search search`) and filenames matching subcommands (e.g. `muninn memory sync sync`) are parsed without routing ambiguity or argument swallowing.
-4. **Robust Value Conversions (`num`)**:
-   - The `num(v, fallback)` helper handles non-string and non-finite argument types safely without throwing `TypeError`.
+4. **Numeric-Looking Values**:
+   - A token beginning with `-` is still accepted as a flag value when it is a number (for example `--limit -1`), while other `-`-prefixed tokens remain flags.
 
 ### Subcommand Implementations (`src/commands/memory.ts`)
 
@@ -663,34 +675,22 @@ flowchart TD
 
 ### Error Handling & Process Exit Protocol
 
-To guarantee that asynchronous output streams flush completely and child handles terminate cleanly:
+To avoid truncating output and to keep the module importable by tests:
 - Validation errors and unknown subcommands set `process.exitCode = 1` rather than invoking immediate `process.exit(1)`.
-- The CLI main execution wrapper in `src/cli.ts` terminates cleanly:
-  ```ts
-  if (import.meta.main) {
-    main(process.argv.slice(2))
-      .then(() => {
-        process.exit(process.exitCode ?? 0);
-      })
-      .catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(chalk.red(msg));
-        process.exit(1);
-      });
-  }
-  ```
+- `src/cli.ts` only runs `main()` when the module is the process entry point, detected by comparing `realpathSync(process.argv[1])` with `realpathSync(fileURLToPath(import.meta.url))`. Importing the module never parses arguments or exits.
+- A rejected `main()` is reported on stderr as `muninn: <message>` and sets `process.exitCode = 1`; the process is allowed to exit naturally.
 
 ## 5. Verified Execution Contracts via TypeScript Compiler API
 
-Static verification of code contracts is implemented in `src/contracts/compiler.ts`. Instead of shelling out to `tsc` or `bun build` as a child process, Huginn embeds the TypeScript Compiler API directly within the runtime. This provides low-latency, in-process diagnostic extraction, structured error objects, and deterministic gate evaluation.
+Static verification of code contracts is implemented in `src/contracts/compiler.ts`. Instead of shelling out to `tsc` or `bun build` as a child process, Muninn embeds the TypeScript Compiler API directly within the Node/Bun runtime. This provides low-latency, in-process diagnostic extraction, structured error objects, and deterministic report formatting.
 
 ### Architectural Motivation & Core Principles
 
-1. **Zero Subprocess Overhead**: Spawning external CLI processes introduces process startup latency, terminal stream parsing fragility, and IPC overhead. In-process compilation via `ts.createProgram` evaluates ASTs directly in Bun's address space.
+1. **Zero Subprocess Overhead**: Spawning external CLI processes introduces process startup latency, terminal stream parsing fragility, and IPC overhead. In-process compilation via `ts.createProgram` evaluates ASTs directly in the caller's Node/Bun runtime.
 2. **Deterministic Pre-Emit Diagnostics**: Uses `ts.getPreEmitDiagnostics(program, sourceFile)` to intercept semantic, syntactic, and structural errors before any emission stage.
 3. **No Artifact Side-Effects**: Always enforces `noEmit: true` so that verifying contracts never touches the disk, generates build artifacts, or invalidates git working trees.
 4. **Sandboxed & Fail-Closed**: Target files and configuration files are strictly bounded within `projectRoot`. Missing target files or invalid configuration files fail closed immediately.
-5. **Gate Loop Integration**: Formats verification results into machine-parsable markdown diagnostics with verdict markers (`### Overall gate: 🔴\n🛑 BLOCKED: ...`), enabling Huginn's `CycleEngine` to automatically feed compiler errors directly into thinker fix phases (`FIX_VALIDATE`, `FIX_SPEC`).
+5. **Report Formatting for Orchestrators**: `formatDiagnosticsReport` produces machine-parsable Markdown with verdict markers (`### Overall gate: 🔴\n🛑 BLOCKED: ...`). An embedding orchestrator can feed that report into its own fix loop; this package only exports the formatter and the CLI output.
 
 ### Configuration Discovery & Containment (`loadProjectConfig`)
 
@@ -794,7 +794,7 @@ export function createVisualSnippet(
 
 ### Markdown Gate Report Formatting (`formatDiagnosticsReport`)
 
-`formatDiagnosticsReport(result)` converts `ContractVerificationResult` into a Markdown document ready for Huginn's gate evaluation and prompt injection:
+`formatDiagnosticsReport(result)` converts `ContractVerificationResult` into a Markdown document suitable for a CI gate, an orchestrator prompt, or a local report:
 
 - **Pass Output**:
   ```markdown

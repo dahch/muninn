@@ -116,7 +116,7 @@ describe("Muninn CLI Commands & Integration", () => {
       expect(tableNames).toContain("entities");
       expect(tableNames).toContain("observation_entities");
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Muninn memory database initialized");
       expect(logOutput).toContain(dbPath);
       expect(logOutput).toContain(path.basename(tempDir));
@@ -130,7 +130,7 @@ describe("Muninn CLI Commands & Integration", () => {
       });
 
       expect(fs.existsSync(dbPath)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Muninn memory database initialized");
       expect(logOutput).toContain(path.basename(tempDir));
     });
@@ -214,7 +214,7 @@ describe("Muninn CLI Commands & Integration", () => {
         ["auth"]
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "auth" (BM25 ranked):');
       expect(logOutput).toContain("[BUGFIX]");
       expect(logOutput).toContain("Fix JWT token expiration bug");
@@ -231,7 +231,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "SQLite" (BM25 ranked):');
       expect(logOutput).toContain("[DECISION]");
       expect(logOutput).toContain("Adopt SQLite with FTS5");
@@ -248,7 +248,7 @@ describe("Muninn CLI Commands & Integration", () => {
         ["microservice"]
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "microservice" (BM25 ranked):');
       expect(logOutput).toContain("[ARCHITECTURE]");
       expect(logOutput).toContain("Microservices design");
@@ -261,7 +261,7 @@ describe("Muninn CLI Commands & Integration", () => {
         ["nonexistentquery12345"]
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('No observations found matching "nonexistentquery12345".');
     });
 
@@ -272,7 +272,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(errorOutput).toContain("Search query is required");
       expect(process.exitCode).toBe(1);
       expect(exitSpy).not.toHaveBeenCalled();
@@ -291,7 +291,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(errorOutput).toContain("Search query is required");
       expect(process.exitCode).toBe(1);
       expect(exitSpy).not.toHaveBeenCalled();
@@ -308,7 +308,7 @@ describe("Muninn CLI Commands & Integration", () => {
         },
         []
       );
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "auth"');
     });
 
@@ -319,7 +319,7 @@ describe("Muninn CLI Commands & Integration", () => {
         ["microservices"]
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "microservices"');
       expect(logOutput).toContain("Microservices design");
     });
@@ -331,7 +331,7 @@ describe("Muninn CLI Commands & Integration", () => {
         ["search"]
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "search"');
       expect(logOutput).toContain("Adopt SQLite with FTS5");
       expect(process.exitCode).toBe(0);
@@ -343,7 +343,7 @@ describe("Muninn CLI Commands & Integration", () => {
         { "--db": dbPath, "--project": tempDir, _positional: "microservices" }
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "microservices"');
       expect(logOutput).toContain("Microservices design");
     });
@@ -355,7 +355,7 @@ describe("Muninn CLI Commands & Integration", () => {
         ["comprehensive"]
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "comprehensive"');
       expect(logOutput).toContain("[CONVENTION]");
       expect(logOutput).toContain("Repository Pattern Implementation");
@@ -378,7 +378,7 @@ describe("Muninn CLI Commands & Integration", () => {
         },
         []
       );
-      let logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      let logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Found 1 result(s)");
 
       // Negative limit falls back to 10
@@ -393,7 +393,7 @@ describe("Muninn CLI Commands & Integration", () => {
         },
         []
       );
-      logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Found 2 result(s)");
 
       // Non-numeric limit falls back to 10
@@ -408,7 +408,7 @@ describe("Muninn CLI Commands & Integration", () => {
         },
         []
       );
-      logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Found 2 result(s)");
     });
 
@@ -419,7 +419,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain('Found 1 result(s) for "SQLite"');
     });
 
@@ -431,7 +431,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(errorOutput).toContain("Search query is required");
       expect(process.exitCode).toBe(1);
     });
@@ -444,7 +444,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(errorOutput).toContain("Search query is required");
       expect(process.exitCode).toBe(1);
     });
@@ -461,7 +461,7 @@ describe("Muninn CLI Commands & Integration", () => {
         },
         []
       );
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Found 1 result(s)");
     });
 
@@ -473,7 +473,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(errorOutput).toContain("Search query is required");
       expect(process.exitCode).toBe(1);
     });
@@ -517,7 +517,7 @@ describe("Muninn CLI Commands & Integration", () => {
         .filter(Boolean);
       expect(lines.length).toBe(2);
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${exportFile}.`);
     });
 
@@ -549,7 +549,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      let logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      let logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Imported 2 memories (skipped 0 duplicates) from ${exportFile}.`);
 
       // Import again to test duplicate skipping
@@ -565,7 +565,7 @@ describe("Muninn CLI Commands & Integration", () => {
         []
       );
 
-      logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Imported 0 memories (skipped 2 duplicates) from ${exportFile}.`);
     });
 
@@ -603,7 +603,7 @@ describe("Muninn CLI Commands & Integration", () => {
       );
 
       expect(fs.existsSync(syncFile)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${syncFile}.`);
     });
 
@@ -616,7 +616,7 @@ describe("Muninn CLI Commands & Integration", () => {
       );
 
       expect(fs.existsSync(syncFile)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${syncFile}.`);
     });
 
@@ -628,7 +628,7 @@ describe("Muninn CLI Commands & Integration", () => {
       );
 
       expect(fs.existsSync(syncFile)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${syncFile}.`);
     });
 
@@ -641,7 +641,7 @@ describe("Muninn CLI Commands & Integration", () => {
       );
 
       expect(fs.existsSync(syncFile)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${syncFile}.`);
     });
 
@@ -654,7 +654,7 @@ describe("Muninn CLI Commands & Integration", () => {
       );
 
       expect(fs.existsSync(defaultPath)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${defaultPath}.`);
     });
 
@@ -670,7 +670,7 @@ describe("Muninn CLI Commands & Integration", () => {
       );
 
       expect(fs.existsSync(defaultPath)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${defaultPath}.`);
     });
 
@@ -683,7 +683,7 @@ describe("Muninn CLI Commands & Integration", () => {
       });
 
       expect(fs.existsSync(rootSyncFile)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 2 memories to ${rootSyncFile}.`);
     });
 
@@ -693,9 +693,9 @@ describe("Muninn CLI Commands & Integration", () => {
       const ensureSpy = vi.spyOn(dbClientModule, "ensureProject").mockReturnValue({
         id: "test-id",
         name: "test-project",
+        git_remote: null,
         root_path: "",
         created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
       });
 
       try {
@@ -717,9 +717,9 @@ describe("Muninn CLI Commands & Integration", () => {
       const ensureSpy = vi.spyOn(dbClientModule, "ensureProject").mockReturnValue({
         id: "test-id",
         name: "test-project",
+        git_remote: null,
         root_path: "",
         created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
       });
 
       const syncSpy = vi.spyOn(MemoryService.prototype, "syncToDisk");
@@ -740,7 +740,7 @@ describe("Muninn CLI Commands & Integration", () => {
   describe("handleMemoryCommand usage & unknown subcommands", () => {
     it("displays memory usage when called without subcommand", async () => {
       await handleMemoryCommand(undefined, {});
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("muninn memory init");
       expect(logOutput).toContain("muninn memory search");
       expect(logOutput).toContain("muninn memory sync");
@@ -750,7 +750,7 @@ describe("Muninn CLI Commands & Integration", () => {
       for (const helpFlag of ["help", "--help", "-h"]) {
         logSpy.mockClear();
         await handleMemoryCommand(helpFlag, {});
-        const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+        const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
         expect(logOutput).toContain("muninn memory init");
         expect(logOutput).toContain("muninn memory search");
         expect(logOutput).toContain("muninn memory sync");
@@ -760,8 +760,8 @@ describe("Muninn CLI Commands & Integration", () => {
     it("displays memory usage, logs error, and sets process.exitCode = 1 for unknown subcommand (REV-004)", async () => {
       process.exitCode = 0;
       await handleMemoryCommand("invalidcmd", {});
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("muninn memory init");
       expect(logOutput).toContain("muninn memory search");
       expect(errorOutput).toContain("Unknown subcommand: invalidcmd");
@@ -770,7 +770,7 @@ describe("Muninn CLI Commands & Integration", () => {
 
     it("printMemoryUsage outputs usage directly", () => {
       printMemoryUsage();
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("muninn memory init");
     });
 
@@ -780,7 +780,7 @@ describe("Muninn CLI Commands & Integration", () => {
         const nonExistentDb = path.join(tempDir, `no-init-${helpFlag}.db`);
         await handleMemoryCommand("init", { [helpFlag]: true, "--db": nonExistentDb, "--project": tempDir });
         expect(fs.existsSync(nonExistentDb)).toBe(false);
-        const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+        const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
         expect(logOutput).toContain("muninn memory init");
       }
     });
@@ -790,8 +790,8 @@ describe("Muninn CLI Commands & Integration", () => {
     it("displays mcp usage, logs error, and sets process.exitCode = 1 when called with unknown subcommand (REV-004)", async () => {
       process.exitCode = 0;
       await handleMcpCommand("invalid", {});
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("muninn mcp run [--db <path>] [--project <path>]");
       expect(errorOutput).toContain("Unknown subcommand: invalid");
       expect(process.exitCode).toBe(1);
@@ -799,7 +799,7 @@ describe("Muninn CLI Commands & Integration", () => {
 
     it("displays mcp usage when called without subcommand", async () => {
       await handleMcpCommand(undefined, {});
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("muninn mcp run");
     });
 
@@ -810,7 +810,7 @@ describe("Muninn CLI Commands & Integration", () => {
         startSpy.mockClear();
         await handleMcpCommand("run", { [helpFlag]: true });
         expect(startSpy).not.toHaveBeenCalled();
-        const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+        const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
         expect(logOutput).toContain("muninn mcp run");
       }
       startSpy.mockRestore();
@@ -818,7 +818,7 @@ describe("Muninn CLI Commands & Integration", () => {
 
     it("printMcpUsage outputs mcp usage directly", () => {
       printMcpUsage();
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("muninn mcp run");
     });
 
@@ -827,9 +827,6 @@ describe("Muninn CLI Commands & Integration", () => {
       const mockTransport = {
         set onclose(fn: () => void) {
           closeCallback = fn;
-        },
-        get onclose() {
-          return closeCallback;
         },
       };
 
@@ -871,9 +868,6 @@ describe("Muninn CLI Commands & Integration", () => {
         set onclose(fn: () => void) {
           closeCallback = fn;
         },
-        get onclose() {
-          return closeCallback;
-        },
       };
 
       const startSpy = vi
@@ -902,9 +896,6 @@ describe("Muninn CLI Commands & Integration", () => {
       const mockTransport = {
         set onclose(fn: () => void) {
           closeCallback = fn;
-        },
-        get onclose() {
-          return closeCallback;
         },
       };
 
@@ -935,9 +926,6 @@ describe("Muninn CLI Commands & Integration", () => {
       const mockTransport = {
         set onclose(fn: () => void) {
           closeCallback = fn;
-        },
-        get onclose() {
-          return closeCallback;
         },
       };
 
@@ -986,9 +974,6 @@ describe("Muninn CLI Commands & Integration", () => {
         set onclose(fn: () => void) {
           closeCallback = fn;
         },
-        get onclose() {
-          return closeCallback;
-        },
       };
 
       const startSpy = vi
@@ -1017,9 +1002,6 @@ describe("Muninn CLI Commands & Integration", () => {
       const mockTransport = {
         set onclose(fn: () => void) {
           closeCallback = fn;
-        },
-        get onclose() {
-          return closeCallback;
         },
       };
 
@@ -1053,7 +1035,7 @@ describe("Muninn CLI Commands & Integration", () => {
     it("routes 'memory init' through main", async () => {
       await main(["memory", "init", "--db", dbPath, "--project", tempDir]);
       expect(fs.existsSync(dbPath)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Muninn memory database initialized");
     });
 
@@ -1078,7 +1060,7 @@ describe("Muninn CLI Commands & Integration", () => {
         tempDir,
       ]);
 
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("Resolved crash on startup");
     });
 
@@ -1096,15 +1078,15 @@ describe("Muninn CLI Commands & Integration", () => {
       ]);
 
       expect(fs.existsSync(syncFile)).toBe(true);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain(`Synced 0 memories to ${syncFile}.`);
     });
 
     it("routes 'mcp' through main", async () => {
       process.exitCode = 0;
       await main(["mcp", "unknown"]);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-      const errorOutput = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("muninn mcp run");
       expect(errorOutput).toContain("Unknown subcommand: unknown");
       expect(process.exitCode).toBe(1);

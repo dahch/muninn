@@ -21,6 +21,8 @@ export interface Project {
   created_at: string;
 }
 
+export type ObservationStatus = "active" | "superseded";
+
 export interface Observation {
   id: string;
   project_id: string;
@@ -28,6 +30,8 @@ export interface Observation {
   title: string;
   content: string;
   topic_key: string | null;
+  status: ObservationStatus;
+  superseded_by: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -100,6 +104,8 @@ CREATE TABLE IF NOT EXISTS observations (
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   topic_key TEXT,
+  status TEXT CHECK(status IN ('active', 'superseded')) NOT NULL DEFAULT 'active',
+  superseded_by TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -311,6 +317,24 @@ export function getDatabase(dbPath?: string, startDir?: string): Database.Databa
 
     const schema = loadSchemaSql();
     db.exec(schema);
+
+    // Databases created before decision supersession lack these columns. Keep
+    // the migration column-by-column and idempotent, so reopening never touches
+    // an already migrated row, index, or trigger.
+    const columns = new Set(
+      db
+        .prepare<[], { name: string }>("PRAGMA table_info(observations)")
+        .all()
+        .map((column) => column.name)
+    );
+    if (!columns.has("status")) {
+      db.exec(
+        "ALTER TABLE observations ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded'))"
+      );
+    }
+    if (!columns.has("superseded_by")) {
+      db.exec("ALTER TABLE observations ADD COLUMN superseded_by TEXT");
+    }
   } catch (err) {
     db.close();
     throw err;

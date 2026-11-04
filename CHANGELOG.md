@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Decision supersession: `saveObservation` accepts `supersedesTopicKey`, atomically marking the
+  same project's active decisions with the matching topic key as `superseded` and recording the
+  replacement ID. New databases include `observations.status` and `observations.superseded_by`,
+  and existing databases are migrated idempotently on open.
+- Lifecycle-aware retrieval: `search` and `getContext` accept `includeSuperseded` (default
+  `false`) and expose `status` / `superseded_by` in their results.
+- MCP compatibility: `muninn_save` accepts `supersedesTopicKey` / `supersedes_topic_key`, and
+  `muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`.
+
 ## 0.1.0
 
 The first release of Muninn as its own package: the memory engine extracted from

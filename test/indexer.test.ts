@@ -702,7 +702,7 @@ export function getValue(): string { return "val"; }
 
       await handleCheckCommand(["warn.ts"], { "--project": tempDir });
       expect(process.exitCode).toBe(0);
-      const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
       expect(logOutput).toContain("TypeScript contracts verified");
       expect(logOutput).toContain("Diagnostics:");
       expect(logOutput).toContain("TS1005");
@@ -716,7 +716,7 @@ export function getValue(): string { return "val"; }
       for (const helpFlag of ["--help", "-h"]) {
         logSpy.mockClear();
         await handleCheckCommand([], { [helpFlag]: true });
-        const logOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+        const logOutput = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
         expect(logOutput).toContain(
           "muninn check — Static TypeScript execution contract verification"
         );

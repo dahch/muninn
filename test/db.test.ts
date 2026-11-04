@@ -1066,3 +1066,254 @@ describe("Muninn one-root resolution (ADR-49)", () => {
 });
 
 
+
+describe("Observation lifecycle schema migration (REQ-2 / AC-2)", () => {
+  const roots: string[] = [];
+
+  const PRE_UPDATE_DDL = `
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      git_remote TEXT,
+      root_path TEXT NOT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE observations (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      category TEXT CHECK(category IN ('decision', 'convention', 'discovery', 'bugfix', 'architecture')) NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      topic_key TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_observations_project_id ON observations(project_id);
+    CREATE INDEX idx_observations_updated_at ON observations(updated_at);
+    CREATE INDEX idx_observations_project_updated ON observations(project_id, updated_at DESC, created_at DESC);
+    CREATE VIRTUAL TABLE observations_fts USING fts5(
+      title, content, topic_key, content='observations', content_rowid='rowid'
+    );
+    CREATE TRIGGER obs_ai AFTER INSERT ON observations BEGIN
+      INSERT INTO observations_fts(rowid, title, content, topic_key)
+      VALUES (new.rowid, new.title, new.content, new.topic_key);
+    END;
+    CREATE TRIGGER obs_ad AFTER DELETE ON observations BEGIN
+      INSERT INTO observations_fts(observations_fts, rowid, title, content, topic_key)
+      VALUES ('delete', old.rowid, old.title, old.content, old.topic_key);
+    END;
+    CREATE TRIGGER obs_au AFTER UPDATE ON observations BEGIN
+      INSERT INTO observations_fts(observations_fts, rowid, title, content, topic_key)
+      VALUES ('delete', old.rowid, old.title, old.content, old.topic_key);
+      INSERT INTO observations_fts(rowid, title, content, topic_key)
+      VALUES (new.rowid, new.title, new.content, new.topic_key);
+    END;
+  `;
+
+  function tempDbPath(label: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `muninn-migration-${label}-`));
+    roots.push(dir);
+    return path.join(dir, "muninn.db");
+  }
+
+  function createPreUpdateDatabase(
+    dbPath: string,
+    ddl: string = PRE_UPDATE_DDL
+  ): void {
+    const legacy = new Database(dbPath);
+    try {
+      legacy.exec(ddl);
+      legacy
+        .prepare(
+          "INSERT INTO projects (id, name, root_path) VALUES (?, ?, ?)"
+        )
+        .run("project-legacy", "legacy", "/tmp/legacy-project");
+      legacy
+        .prepare(
+          "INSERT INTO observations (id, project_id, category, title, content, topic_key) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .run(
+          "obs-legacy",
+          "project-legacy",
+          "decision",
+          "Legacy storage decision",
+          "Original searchable content.",
+          "storage"
+        );
+    } finally {
+      legacy.close();
+    }
+  }
+
+  afterEach(() => {
+    while (roots.length > 0) {
+      fs.rmSync(roots.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates a pre-update database without losing rows, indexes, triggers, or FTS behavior", () => {
+    const dbPath = tempDbPath("both");
+    createPreUpdateDatabase(dbPath);
+
+    const db = getDatabase(dbPath);
+    try {
+      const columns = db
+        .prepare<[], { name: string }>("PRAGMA table_info(observations)")
+        .all()
+        .map((c) => c.name);
+      expect(columns).toContain("status");
+      expect(columns).toContain("superseded_by");
+
+      const migrated = db
+        .prepare<[string], Observation>(
+          "SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at FROM observations WHERE id = ?"
+        )
+        .get("obs-legacy");
+      expect(migrated?.title).toBe("Legacy storage decision");
+      expect(migrated?.topic_key).toBe("storage");
+      expect(migrated?.status).toBe("active");
+      expect(migrated?.superseded_by).toBeNull();
+
+      const indexes = db
+        .prepare<[], { name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )
+        .all()
+        .map((r) => r.name);
+      expect(indexes).toContain("idx_observations_project_updated");
+
+      const triggers = db
+        .prepare<[], { name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )
+        .all()
+        .map((r) => r.name);
+      expect(triggers).toEqual(
+        expect.arrayContaining(["obs_ai", "obs_ad", "obs_au"])
+      );
+
+      // Existing FTS content survived, and the unchanged triggers index new
+      // inserts and updates against the migrated table.
+      expect(
+        db
+          .prepare(
+            "SELECT count(*) FROM observations_fts WHERE observations_fts MATCH 'Original'"
+          )
+          .pluck()
+          .get()
+      ).toBe(1);
+
+      db.prepare(
+        "INSERT INTO observations (id, project_id, category, title, content, topic_key) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(
+        "obs-new",
+        "project-legacy",
+        "decision",
+        "Migrated insert",
+        "Fresh searchable content.",
+        "storage"
+      );
+      expect(
+        db
+          .prepare(
+            "SELECT count(*) FROM observations_fts WHERE observations_fts MATCH 'Fresh'"
+          )
+          .pluck()
+          .get()
+      ).toBe(1);
+
+      db.prepare(
+        "UPDATE observations SET content = ? WHERE id = ?"
+      ).run("Updated searchable content.", "obs-legacy");
+      expect(
+        db
+          .prepare(
+            "SELECT count(*) FROM observations_fts WHERE observations_fts MATCH 'Updated'"
+          )
+          .pluck()
+          .get()
+      ).toBe(1);
+      expect(
+        db
+          .prepare(
+            "SELECT count(*) FROM observations_fts WHERE observations_fts MATCH 'Original'"
+          )
+          .pluck()
+          .get()
+      ).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is idempotent on reopen and preserves migrated lifecycle state", () => {
+    const dbPath = tempDbPath("reopen");
+    createPreUpdateDatabase(dbPath);
+
+    const first = getDatabase(dbPath);
+    first
+      .prepare(
+        "UPDATE observations SET status = 'superseded', superseded_by = ? WHERE id = ?"
+      )
+      .run("obs-newer", "obs-legacy");
+    first.close();
+
+    const second = getDatabase(dbPath);
+    try {
+      const columns = second
+        .prepare<[], { name: string }>("PRAGMA table_info(observations)")
+        .all()
+        .map((c) => c.name);
+      expect(columns.filter((name) => name === "status")).toHaveLength(1);
+      expect(columns.filter((name) => name === "superseded_by")).toHaveLength(1);
+
+      const row = second
+        .prepare<[string], { status: string; superseded_by: string | null }>(
+          "SELECT status, superseded_by FROM observations WHERE id = ?"
+        )
+        .get("obs-legacy");
+      expect(row).toEqual({
+        status: "superseded",
+        superseded_by: "obs-newer",
+      });
+    } finally {
+      second.close();
+    }
+  });
+
+  it("adds only the missing superseded_by column when status already exists", () => {
+    const dbPath = tempDbPath("one-column");
+    const partialDdl = PRE_UPDATE_DDL.replace(
+      "      topic_key TEXT,\n      created_at",
+      "      topic_key TEXT,\n      status TEXT CHECK(status IN ('active', 'superseded')) NOT NULL DEFAULT 'active',\n      created_at"
+    );
+    createPreUpdateDatabase(dbPath, partialDdl);
+
+    const before = new Database(dbPath);
+    before
+      .prepare("UPDATE observations SET status = 'superseded' WHERE id = ?")
+      .run("obs-legacy");
+    before.close();
+
+    const db = getDatabase(dbPath);
+    try {
+      const columns = db
+        .prepare<[], { name: string }>("PRAGMA table_info(observations)")
+        .all()
+        .map((c) => c.name);
+      expect(columns).toContain("status");
+      expect(columns).toContain("superseded_by");
+
+      const row = db
+        .prepare<[string], { status: string; superseded_by: string | null }>(
+          "SELECT status, superseded_by FROM observations WHERE id = ?"
+        )
+        .get("obs-legacy");
+      expect(row?.status).toBe("superseded");
+      expect(row?.superseded_by).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+});

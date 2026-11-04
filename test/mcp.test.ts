@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { Writable } from "node:stream";
 import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { z } from "zod";
@@ -14,6 +15,7 @@ import { MemoryService } from "../src/service/index.js";
 import {
   createMcpServer,
   startMcpServer,
+  BoundedStdioServerTransport,
   formatZodErrors,
   normalizeArgs,
   TOOL_REGISTRY,
@@ -1668,5 +1670,243 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
       expect(mcpIndex.SymbolSchema).toBe(SymbolSchema);
       expect(mcpIndex.TOOL_REGISTRY).toBe(TOOL_REGISTRY);
     });
+  });
+});
+
+describe("MCP lifecycle arguments (REQ-6 / AC-6)", () => {
+  let db: Database.Database;
+  let service: MemoryService;
+  let tempDir: string;
+  let server: ReturnType<typeof createMcpServer>;
+  let client: Client;
+
+  beforeEach(async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-mcp-lifecycle-"));
+    db = getDatabase(":memory:");
+    service = new MemoryService({ db, projectRoot: tempDir });
+    server = createMcpServer(service);
+
+    const [serverTransport, clientTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    client = new Client(
+      { name: "test-mcp-lifecycle-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    await client.connect(clientTransport);
+  });
+
+  afterEach(async () => {
+    try {
+      await client.close();
+    } catch {
+      // ignore close errors
+    }
+    try {
+      await server.close();
+    } catch {
+      // ignore close errors
+    }
+    service.close(true);
+    if (db.open) {
+      db.close();
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  async function callTool(
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<any> {
+    const result = (await client.callTool({ name, arguments: args })) as {
+      content: Array<{ type: string; text: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    return JSON.parse(result.content[0].text);
+  }
+
+  it("advertises the new optional arguments and snake_case aliases", async () => {
+    const response = await client.listTools();
+    const save = response.tools.find((t) => t.name === "muninn_save")!;
+    expect(save.inputSchema.properties).toHaveProperty("supersedesTopicKey");
+    expect(save.inputSchema.properties).toHaveProperty("supersedes_topic_key");
+
+    const search = response.tools.find((t) => t.name === "muninn_search")!;
+    expect(search.inputSchema.properties).toHaveProperty("includeSuperseded");
+    expect(search.inputSchema.properties).toHaveProperty("include_superseded");
+
+    const context = response.tools.find((t) => t.name === "muninn_context")!;
+    expect(context.inputSchema.properties).toHaveProperty("includeSuperseded");
+    expect(context.inputSchema.properties).toHaveProperty("include_superseded");
+  });
+
+  it("accepts camelCase supersedesTopicKey in muninn_save", async () => {
+    const oldDecision = service.saveObservation({
+      category: "decision",
+      title: "Camel old decision",
+      content: "Old",
+      topicKey: "camel-key",
+    });
+
+    const saved = await callTool("muninn_save", {
+      category: "decision",
+      title: "Camel replacement decision",
+      content: "Replacement",
+      topicKey: "camel-key",
+      supersedesTopicKey: "camel-key",
+    });
+
+    expect(saved.status).toBe("active");
+    expect(saved.superseded_by).toBeNull();
+    expect(
+      db
+        .prepare<[string], { status: string; superseded_by: string | null }>(
+          "SELECT status, superseded_by FROM observations WHERE id = ?"
+        )
+        .get(oldDecision.id)
+    ).toEqual({ status: "superseded", superseded_by: saved.id });
+  });
+
+  it("accepts snake_case supersedes_topic_key in muninn_save", async () => {
+    const oldDecision = service.saveObservation({
+      category: "decision",
+      title: "Snake old decision",
+      content: "Old",
+      topicKey: "snake-key",
+    });
+
+    const saved = await callTool("muninn_save", {
+      category: "decision",
+      title: "Snake replacement decision",
+      content: "Replacement",
+      topicKey: "snake-key",
+      supersedes_topic_key: "snake-key",
+    });
+
+    expect(
+      db
+        .prepare<[string], { status: string; superseded_by: string | null }>(
+          "SELECT status, superseded_by FROM observations WHERE id = ?"
+        )
+        .get(oldDecision.id)
+    ).toEqual({ status: "superseded", superseded_by: saved.id });
+  });
+
+  it("defaults search and context to active and accepts both include aliases", async () => {
+    const oldDecision = service.saveObservation({
+      category: "decision",
+      title: "MCP old lifecycle decision",
+      content: "mcpmarker old",
+      topicKey: "mcp-retrieval",
+    });
+    const newDecision = service.saveObservation({
+      category: "decision",
+      title: "MCP new lifecycle decision",
+      content: "mcpmarker new",
+      topicKey: "mcp-retrieval",
+      supersedesTopicKey: "mcp-retrieval",
+    });
+
+    const defaultSearch = await callTool("muninn_search", {
+      query: "mcpmarker",
+    });
+    expect(defaultSearch.map((r: any) => r.id)).toEqual([newDecision.id]);
+
+    for (const args of [
+      { query: "mcpmarker", includeSuperseded: true },
+      { query: "mcpmarker", include_superseded: true },
+    ]) {
+      const results = await callTool("muninn_search", args);
+      expect(results.map((r: any) => r.id).sort()).toEqual(
+        [oldDecision.id, newDecision.id].sort()
+      );
+      expect(
+        results.find((r: any) => r.id === oldDecision.id)?.status
+      ).toBe("superseded");
+      expect(
+        results.find((r: any) => r.id === oldDecision.id)?.superseded_by
+      ).toBe(newDecision.id);
+    }
+
+    const defaultContext = await callTool("muninn_context", {
+      topicKey: "mcp-retrieval",
+    });
+    expect(defaultContext.map((r: any) => r.id)).toEqual([newDecision.id]);
+
+    for (const args of [
+      { topicKey: "mcp-retrieval", includeSuperseded: true },
+      { topic_key: "mcp-retrieval", include_superseded: true },
+    ]) {
+      const results = await callTool("muninn_context", args);
+      expect(results.map((r: any) => r.id).sort()).toEqual(
+        [oldDecision.id, newDecision.id].sort()
+      );
+      expect(
+        results.find((r: any) => r.id === oldDecision.id)?.superseded_by
+      ).toBe(newDecision.id);
+    }
+  });
+});
+
+describe("BoundedStdioServerTransport write guardrails (REQ-30 / AC-30.3)", () => {
+  const message = { jsonrpc: "2.0", method: "notifications/initialized" } as any;
+
+  function writableOutput(): Writable {
+    return new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+  }
+
+  it("resolves when the output stream accepts the write", async () => {
+    const output = writableOutput();
+    const transport = new BoundedStdioServerTransport(undefined, output, {
+      writeTimeoutMs: 1000,
+    });
+
+    await expect(transport.send(message)).resolves.toBeUndefined();
+  });
+
+  it("rejects when the output stream stays backed up past the deadline", async () => {
+    const output = writableOutput();
+    (output as any).write = () => false; // no drain will ever arrive
+    const transport = new BoundedStdioServerTransport(undefined, output, {
+      writeTimeoutMs: 20,
+    });
+
+    await expect(transport.send(message)).rejects.toThrow(
+      /timed out after 20ms/
+    );
+  });
+
+  it("rejects with a sanitized error when the output pipe breaks", async () => {
+    const output = writableOutput();
+    (output as any).write = () => false;
+    const transport = new BoundedStdioServerTransport(undefined, output, {
+      writeTimeoutMs: 1000,
+    });
+
+    const pending = transport.send(message);
+    output.emit("error", new Error("EPIPE: broken pipe"));
+
+    await expect(pending).rejects.toThrow(
+      /MCP stdio write failed.*EPIPE: broken pipe/
+    );
+  });
+
+  it("rejects when the underlying write throws synchronously", async () => {
+    const output = writableOutput();
+    (output as any).write = () => {
+      throw new Error("synchronous write failure");
+    };
+    const transport = new BoundedStdioServerTransport(undefined, output, {
+      writeTimeoutMs: 0,
+    });
+
+    await expect(transport.send(message)).rejects.toThrow(
+      /synchronous write failure/
+    );
   });
 });

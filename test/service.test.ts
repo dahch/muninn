@@ -5,13 +5,14 @@ import path from "node:path";
 import os from "node:os";
 import Database from "better-sqlite3";
 import * as clientModule from "../src/db/client.js";
-import { getDatabase } from "../src/db/client.js";
+import { ensureProject, getDatabase } from "../src/db/client.js";
 import {
   MemoryService,
   sanitizeFtsQuery,
   normalizeSymbol,
   VALID_CATEGORIES,
   type SaveObservationInput,
+  type Observation,
   type IMemoryService,
 } from "../src/service/memory-service.js";
 
@@ -1732,5 +1733,411 @@ describe("MemoryService one-root attribution (ADR-49)", () => {
     } finally {
       reopened.close?.();
     }
+  });
+});
+
+describe("Decision supersession and lifecycle-aware retrieval (REQ-4 / REQ-5)", () => {
+  let db: Database.Database;
+  let service: MemoryService;
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-supersede-test-"));
+    db = getDatabase(":memory:");
+    service = new MemoryService({ db, projectRoot: tempDir });
+  });
+
+  afterEach(() => {
+    service.close(true);
+    if (db.open) {
+      db.close();
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("supersedes active decisions in the same project with the matching topic key", () => {
+    const oldDecision = service.saveObservation({
+      category: "decision",
+      title: "Old storage decision",
+      content: "Use a single database file.",
+      topicKey: "storage-choice",
+    });
+    expect(oldDecision.status).toBe("active");
+    expect(oldDecision.superseded_by).toBeNull();
+
+    const newDecision = service.saveObservation({
+      category: "decision",
+      title: "New storage decision",
+      content: "Use separate database files per project.",
+      topicKey: "storage-choice",
+      supersedesTopicKey: "storage-choice",
+    });
+
+    const oldRow = db
+      .prepare<[string], Observation>(
+        "SELECT status, superseded_by FROM observations WHERE id = ?"
+      )
+      .get(oldDecision.id);
+    expect(oldRow).toEqual({
+      status: "superseded",
+      superseded_by: newDecision.id,
+    });
+
+    // The new decision must never supersede itself, even when its own topic key
+    // matches the replacement key.
+    const newRow = db
+      .prepare<[string], Observation>(
+        "SELECT status, superseded_by FROM observations WHERE id = ?"
+      )
+      .get(newDecision.id);
+    expect(newRow).toEqual({ status: "active", superseded_by: null });
+  });
+
+  it("accepts the snake_case alias and leaves unrelated observations untouched", () => {
+    const otherProject = {
+      id: "other-project",
+      name: "other",
+      git_remote: null,
+      root_path: path.join(tempDir, "other"),
+      created_at: new Date().toISOString(),
+    };
+    db.prepare(
+      "INSERT INTO projects (id, name, git_remote, root_path, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(
+      otherProject.id,
+      otherProject.name,
+      otherProject.git_remote,
+      otherProject.root_path,
+      otherProject.created_at
+    );
+
+    const target = service.saveObservation({
+      category: "decision",
+      title: "Target active decision",
+      content: "Target",
+      topicKey: "shared-key",
+    });
+    const nonDecision = service.saveObservation({
+      category: "convention",
+      title: "Target convention",
+      content: "Target convention",
+      topicKey: "shared-key",
+    });
+    const otherKey = service.saveObservation({
+      category: "decision",
+      title: "Other key decision",
+      content: "Other key",
+      topicKey: "different-key",
+    });
+    const otherProjectDecision = service.saveObservation({
+      category: "decision",
+      title: "Other project decision",
+      content: "Other project",
+      topicKey: "shared-key",
+      projectId: otherProject.id,
+    });
+    const alreadySuperseded = service.saveObservation({
+      category: "decision",
+      title: "Already superseded decision",
+      content: "Already superseded",
+      topicKey: "shared-key",
+    });
+    db.prepare(
+      "UPDATE observations SET status = 'superseded', superseded_by = 'earlier-id' WHERE id = ?"
+    ).run(alreadySuperseded.id);
+
+    const replacement = service.saveObservation({
+      category: "decision",
+      title: "Replacement decision",
+      content: "Replacement",
+      supersedes_topic_key: "shared-key",
+    });
+
+    const statusOf = (id: string) =>
+      db
+        .prepare<[string], { status: string; superseded_by: string | null }>(
+          "SELECT status, superseded_by FROM observations WHERE id = ?"
+        )
+        .get(id);
+
+    expect(statusOf(target.id)).toEqual({
+      status: "superseded",
+      superseded_by: replacement.id,
+    });
+    expect(statusOf(nonDecision.id)).toEqual({
+      status: "active",
+      superseded_by: null,
+    });
+    expect(statusOf(otherKey.id)).toEqual({
+      status: "active",
+      superseded_by: null,
+    });
+    expect(statusOf(otherProjectDecision.id)).toEqual({
+      status: "active",
+      superseded_by: null,
+    });
+    expect(statusOf(alreadySuperseded.id)).toEqual({
+      status: "superseded",
+      superseded_by: "earlier-id",
+    });
+  });
+
+  it("does not fail for an unmatched key and does not supersede when the option is omitted", () => {
+    const existing = service.saveObservation({
+      category: "decision",
+      title: "Existing unmatched decision",
+      content: "Existing",
+      topicKey: "existing-key",
+    });
+
+    const newDecision = service.saveObservation({
+      category: "decision",
+      title: "No match decision",
+      content: "No match",
+      topicKey: "new-key",
+      supersedesTopicKey: "missing-key",
+    });
+    const noKeyDecision = service.saveObservation({
+      category: "decision",
+      title: "No supersedes option",
+      content: "No option",
+      topicKey: "existing-key",
+    });
+
+    const rows = db
+      .prepare<[], { id: string; status: string; superseded_by: string | null }>(
+        "SELECT id, status, superseded_by FROM observations"
+      )
+      .all();
+    expect(rows.find((r) => r.id === existing.id)).toEqual({
+      id: existing.id,
+      status: "active",
+      superseded_by: null,
+    });
+    expect(rows.find((r) => r.id === newDecision.id)?.status).toBe("active");
+    expect(rows.find((r) => r.id === noKeyDecision.id)?.status).toBe("active");
+  });
+
+  it("rolls back the new decision if the supersession update fails", () => {
+    const existing = service.saveObservation({
+      category: "decision",
+      title: "Atomic existing decision",
+      content: "Existing",
+      topicKey: "atomic-key",
+    });
+    db.exec(`
+      CREATE TRIGGER fail_supersession
+      BEFORE UPDATE OF status ON observations
+      WHEN NEW.status = 'superseded'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated supersession failure');
+      END;
+    `);
+
+    expect(() =>
+      service.saveObservation({
+        category: "decision",
+        title: "Atomic replacement decision",
+        content: "Replacement",
+        topicKey: "atomic-key",
+        supersedesTopicKey: "atomic-key",
+      })
+    ).toThrow(/simulated supersession failure/);
+
+    const newCount = db
+      .prepare<[], { count: number }>(
+        "SELECT COUNT(*) AS count FROM observations WHERE title = 'Atomic replacement decision'"
+      )
+      .get()?.count;
+    expect(newCount).toBe(0);
+    expect(
+      db
+        .prepare<[string], { status: string; superseded_by: string | null }>(
+          "SELECT status, superseded_by FROM observations WHERE id = ?"
+        )
+        .get(existing.id)
+    ).toEqual({ status: "active", superseded_by: null });
+  });
+
+  it("excludes superseded observations by default and includes them on request", () => {
+    const oldDecision = service.saveObservation({
+      category: "decision",
+      title: "Alpha lifecycle decision",
+      content: "supersededmarker alpha content",
+      topicKey: "retrieval-key",
+    });
+    const newDecision = service.saveObservation({
+      category: "decision",
+      title: "Beta lifecycle decision",
+      content: "supersededmarker beta content",
+      topicKey: "retrieval-key",
+      supersedesTopicKey: "retrieval-key",
+    });
+
+    const defaultSearch = service.search({ query: "supersededmarker" });
+    expect(defaultSearch.map((r) => r.id)).toEqual([newDecision.id]);
+    expect(defaultSearch[0].status).toBe("active");
+    expect(defaultSearch[0].superseded_by).toBeNull();
+
+    const allSearch = service.search({
+      query: "supersededmarker",
+      includeSuperseded: true,
+    });
+    expect(allSearch.map((r) => r.id).sort()).toEqual(
+      [oldDecision.id, newDecision.id].sort()
+    );
+    const supersededResult = allSearch.find((r) => r.id === oldDecision.id);
+    expect(supersededResult?.status).toBe("superseded");
+    expect(supersededResult?.superseded_by).toBe(newDecision.id);
+
+    const defaultContext = service.getContext({ topicKey: "retrieval-key" });
+    expect(defaultContext.map((r) => r.id)).toEqual([newDecision.id]);
+
+    const allContext = service.getContext({
+      topicKey: "retrieval-key",
+      includeSuperseded: true,
+    });
+    expect(allContext.map((r) => r.id).sort()).toEqual(
+      [oldDecision.id, newDecision.id].sort()
+    );
+    expect(
+      allContext.find((r) => r.id === oldDecision.id)?.status
+    ).toBe("superseded");
+    expect(
+      allContext.find((r) => r.id === oldDecision.id)?.superseded_by
+    ).toBe(newDecision.id);
+  });
+});
+
+describe("Decision lifecycle persistence and disk sync (REQ-4 / REQ-5)", () => {
+  let db: Database.Database;
+  let service: MemoryService;
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-lifecycle-sync-"));
+    db = getDatabase(":memory:");
+    service = new MemoryService({ db, projectRoot: tempDir });
+  });
+
+  afterEach(() => {
+    service.close(true);
+    if (db.open) {
+      db.close();
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("preserves status and superseded_by through export and import", () => {
+    const oldDecision = service.saveObservation({
+      category: "decision",
+      title: "Persisted old decision",
+      content: "Old lifecycle content.",
+      topicKey: "persisted-key",
+    });
+    const newDecision = service.saveObservation({
+      category: "decision",
+      title: "Persisted new decision",
+      content: "New lifecycle content.",
+      topicKey: "persisted-key",
+      supersedesTopicKey: "persisted-key",
+    });
+
+    const exportPath = path.join(tempDir, "lifecycle.jsonl");
+    expect(service.syncToDisk(exportPath).count).toBe(2);
+
+    const records = fs
+      .readFileSync(exportPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const oldRecord = records.find((r) => r.id === oldDecision.id);
+    expect(oldRecord.status).toBe("superseded");
+    expect(oldRecord.superseded_by).toBe(newDecision.id);
+
+    const freshDb = getDatabase(":memory:");
+    const freshService = new MemoryService({ db: freshDb, projectRoot: tempDir });
+    try {
+      const imported = freshService.importFromDisk(exportPath);
+      expect(imported).toEqual({ imported: 2, skipped: 0 });
+
+      const restored = freshService.getContext({ includeSuperseded: true });
+      const restoredOld = restored.find((r) => r.id === oldDecision.id);
+      expect(restoredOld?.status).toBe("superseded");
+      expect(restoredOld?.superseded_by).toBe(newDecision.id);
+
+      // The imported lifecycle state is honored by the default active-only view.
+      expect(
+        freshService.search({ query: "lifecycle" }).map((r) => r.id)
+      ).toEqual([newDecision.id]);
+    } finally {
+      freshService.close(true);
+      if (freshDb.open) {
+        freshDb.close();
+      }
+    }
+  });
+
+  it("defaults records without lifecycle fields to active during import", () => {
+    const importPath = path.join(tempDir, "legacy-records.jsonl");
+    fs.writeFileSync(
+      importPath,
+      JSON.stringify({
+        id: "legacy-no-lifecycle",
+        project_id: service.currentProject.id,
+        category: "convention",
+        title: "Legacy record without lifecycle",
+        content: "Pre-lifecycle export content.",
+      }) + "\n",
+      "utf-8"
+    );
+
+    expect(service.importFromDisk(importPath)).toEqual({
+      imported: 1,
+      skipped: 0,
+    });
+
+    const restored = service.getContext().find(
+      (r) => r.id === "legacy-no-lifecycle"
+    );
+    expect(restored?.status).toBe("active");
+    expect(restored?.superseded_by).toBeNull();
+  });
+
+  it("exports observations from all projects via the options overload", () => {
+    const secondProject = ensureProject(db, {
+      rootPath: path.join(tempDir, "second-project"),
+      name: "second-project",
+    });
+    const first = service.saveObservation({
+      category: "decision",
+      title: "First project export",
+      content: "First project content",
+      topicKey: "all-projects",
+    });
+    const second = service.saveObservation({
+      category: "discovery",
+      title: "Second project export",
+      content: "Second project content",
+      projectId: secondProject.id,
+    });
+    db.prepare(
+      "UPDATE observations SET status = 'superseded', superseded_by = ? WHERE id = ?"
+    ).run(second.id, first.id);
+
+    const result = service.syncToDisk({ allProjects: true });
+    expect(result.count).toBe(2);
+    expect(result.path).toBe(
+      path.join(service.currentProject.root_path, ".huginn", "memories.jsonl")
+    );
+
+    const records = fs
+      .readFileSync(result.path, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(records.map((r) => r.id).sort()).toEqual([first.id, second.id].sort());
+    expect(records.find((r) => r.id === first.id)?.status).toBe("superseded");
+    expect(records.find((r) => r.id === first.id)?.superseded_by).toBe(second.id);
   });
 });
