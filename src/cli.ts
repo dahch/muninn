@@ -17,6 +17,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { handleMcpCommand, handleMemoryCommand } from "./commands/memory.js";
 import { handleCheckCommand } from "./commands/check.js";
+import { handleSetupCommand } from "./commands/setup.js";
 
 export const VERSION = "0.1.0";
 
@@ -40,6 +41,13 @@ const BOOLEAN_FLAGS = new Set([
   "--import",
   "--json",
   "--quiet",
+  "--force",
+  "--dry-run",
+  "--status",
+  "--portable",
+  "--no-portable",
+  "--no-rules",
+  "--list",
 ]);
 
 /**
@@ -92,11 +100,13 @@ Usage:
   muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
   muninn check [files...] [--project <path>]
   muninn mcp run [--db <path>] [--project <path>]
+  muninn setup [--portable|--no-portable] [--force] [--dry-run] [--status] [--home <path>]
 
 Commands:
   memory  query and manage the persistent codebase memory (init, search, sync, index, brief)
   mcp     start the Muninn MCP server for agent memory integration (run)
   check   verify TypeScript execution contracts and pre-emit diagnostics
+  setup   install and diagnose Muninn agent integrations, starting with the portable MCP config
 
 Storage:
   The database resolves to <git-root>/.huginn/muninn.db inside a repository and
@@ -165,6 +175,11 @@ export async function main(argv: string[]): Promise<void> {
           ? [args._positional]
           : [];
     await handleCheckCommand(files, args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "setup") {
+    await handleSetupCommand(args as Record<string, string | boolean | undefined>);
     return;
   }
 

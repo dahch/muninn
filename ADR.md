@@ -3,7 +3,8 @@
 Decisions are listed in recording order. `ADR-1`–`ADR-3` are implemented in the current codebase.
 `ADR-4`–`ADR-10` were recorded retroactively from the 0.1.0 codebase so the existing architecture has
 an explicit history. `ADR-11` records a correction to the dependency relation set described in
-`ADR-6`.
+`ADR-6`. `ADR-12`–`ADR-14` are proposed setup work; `ADR-15` records the portable-only slice that is
+actually implemented.
 
 ## ADR-1: Track decision supersession in observation rows
 
@@ -211,3 +212,24 @@ an explicit history. `ADR-11` records a correction to the dependency relation se
 - **Context**: MCP configuration is machine-readable configuration, while an agent’s rules file is human-authored prose that may contain unrelated instructions. Replacing that file or appending unmarked text risks losing user content or creating duplicate instructions. The Huginn integrator may also have inserted an older Muninn rules block. Alternatives include leaving rule installation entirely manual, replacing whole rules files, or managing a clearly delimited block in place.
 - **Decision**: When setup selects one or more agent destinations, install Muninn usage guidance by default as a marked `muninn:rules` block. Append it to existing rules files or create a missing file, and on later runs replace only Muninn’s own marked block. Detect the prior `huginn:muninn-rules` block as stale: preserve it without `--force`, and replace it with the Muninn block when forced. Do not modify rules files when setup selects no agents or when `--no-rules` is used. Validate rules paths with the same path-safety checks as configuration paths.
 - **Consequences**: Muninn can provide consistent bootstrap and memory-use guidance without taking ownership of surrounding prose. Shared rules files require deduplication across selected destinations. Stale-block replacement requires explicit user authorization, and status and setup reports must identify the affected rules file and distinguish its outcome from the MCP configuration outcome.
+
+## ADR-15: Ship agent setup in iterations, starting with the portable destination
+
+- **Date**: 2026-11-05
+- **Status**: Accepted and implemented for the portable destination
+- **Context**: ADR-12–ADR-14 propose a catalog for 13 agents, JSON/TOML merging, and rules blocks. That
+  is too large to land and verify as one change, and users already need a safe way to install the
+  project-agnostic MCP entry. The first slice must not pretend the rest of the catalog exists, and it
+  must be safe against malformed and symlinked configuration files.
+- **Decision**: Implement `muninn setup` as a staged feature. Iteration 1 owns only
+  `{home}/.muninn/mcp.json`: it creates or structurally merges the canonical `muninn mcp run` entry,
+  reports `absent` / `registered` / `legacy` / `conflict` / `malformed`, supports `--home`, `--force`,
+  `--dry-run`, `--status`, and `--portable`, and leaves the legacy `{home}/.huginn/mcp.json` untouched.
+  The CLI parses `--agent`, `--no-rules`, and `--list` for forward compatibility but does not implement
+  catalog selection, TOML, or rules installation yet. Each remaining slice follows the acceptance
+  criteria in `plan.md` and the requirements in `SPEC.md`.
+- **Consequences**: Users can install the portable configuration now without waiting for the catalog,
+  and the setup writer can be tested in isolation. Agent-specific configuration and rules still require
+  manual setup or Huginn's integrator until later iterations. Documentation must not claim those
+  destinations work. Adding them should reuse the same path-safety and atomic-write rules rather than
+  creating a second setup path.

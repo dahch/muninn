@@ -624,6 +624,7 @@ flowchart TD
     DISPATCH -- "memory" --> MEM["handleMemoryCommand(subcommand, args, positionals)"]
     DISPATCH -- "mcp" --> MCP["handleMcpCommand(subcommand, args)"]
     DISPATCH -- "check" --> CHK["handleCheckCommand(files, args)"]
+    DISPATCH -- "setup" --> SETUP["handleSetupCommand(args)"]
 
     MEM --> SUBCMD{"subcommand"}
     SUBCMD -- "init" --> INIT["new MemoryService / ensureProject"]
@@ -638,6 +639,8 @@ flowchart TD
     MCPSUBCMD -- "help / unknown" --> MCPUSAGE["printMcpUsage()"]
 
     CHK --> CHKRUN["verifyTypeScriptContracts(projectRoot, files)"]
+
+    SETUP --> SETUPPORTABLE["getPortableStatus() / setupPortable()"]
 ```
 
 ### Argument Parser Enhancements (`parseArgs`)
@@ -646,8 +649,11 @@ flowchart TD
    - Rather than retaining only the first non-command token in `_positional`, `parseArgs` populates `_positionals: string[]`.
    - The first positional argument after the command name determines the subcommand (`init`, `search`, `sync`, `index`, `run`), while remaining entries (`positionals.slice(1)`) are forwarded as positional arguments (such as search queries or file paths).
 2. **Boolean Flag Protection (`BOOLEAN_FLAGS`)**:
-   - A dedicated `Set` flags boolean parameters (`-h`, `--help`, `-v`, `--version`, `--import`, `--json`, `--quiet`).
-   - For any flag in `BOOLEAN_FLAGS`, the parser assigns `true` immediately without consuming the next token, preventing flags like `--import` from consuming subsequent positional file paths. Only `--import` currently changes command behavior; `--json` and `--quiet` are parsed but unused.
+   - A dedicated `Set` flags boolean parameters: `-h`, `--help`, `-v`, `--version`, `--import`,
+     `--json`, `--quiet`, `--force`, `--dry-run`, `--status`, `--portable`, `--no-portable`,
+     `--no-rules`, and `--list`.
+   - For any flag in `BOOLEAN_FLAGS`, the parser assigns `true` immediately without consuming the next token, preventing flags like `--import` from consuming subsequent positional file paths. Flags outside the set (`--db`, `--project`, `--home`, `--agent`, etc.) consume the next non-flag token as their value.
+   - `--json`, `--quiet`, `--no-rules`, and `--list` are parsed but have no behavior yet. `--import` selects import mode; the setup flags are handled by `handleSetupCommand`.
 3. **Keyword Disambiguation & Anti-Shadowing**:
    - By partitioning command arguments through `_positionals`, user search queries matching subcommands (e.g. `muninn memory search search`) and filenames matching subcommands (e.g. `muninn memory sync sync`) are parsed without routing ambiguity or argument swallowing.
 4. **Numeric-Looking Values**:
@@ -734,6 +740,23 @@ flowchart TD
     - Monitors `transport.onclose`, bridges `process.stdin` `'end'`/`'close'` to the same `done()` shutdown path — the SDK transport only observes `'data'`/`'error'`, so without this a parent disconnect is invisible and the server would run forever — and registers signal listeners for `SIGINT` and `SIGTERM`.
     - Installs a `process.stdout` `'error'` handler that logs the EPIPE to `stderr` and turns it into a clean shutdown instead of an unhandled crash mid-response, a no-op `process.stderr` `'error'` handler, and a `server.onerror` logger for protocol failures.
     - On termination, safely shuts down `MemoryService` and closes `MuninnServer` in a `finally` block before exiting.
+
+#### 7. `muninn setup [--portable] [--no-portable] [--force] [--dry-run] [--status] [--home <path>]`
+
+- **Purpose**: Install or diagnose Muninn's portable MCP configuration. Iteration 1 owns only
+  `{home}/.muninn/mcp.json`; the agent catalog, Codex TOML, and rules blocks are not implemented yet.
+  See §7 and [`plan.md`](./plan.md).
+- **Workflow**:
+  - `--home <path>` overrides the OS home directory (useful for tests); a missing value is a usage error.
+  - `--status` calls `getPortableStatus` and prints path, state, legacy diagnostic, and `Changed: false`
+    without writing. Malformed/unsafe state sets exit code 1; a conflict does not.
+  - Normal execution calls `setupPortable`; `--dry-run` reports the planned outcome without touching
+    the filesystem; `--force` replaces a conflicting entry; `--portable` is equivalent to the default.
+  - `--no-portable` without `--agent` is invalid and exits 1. `--agent` is accepted and validated as a
+    string, but the catalog is not implemented, so with `--no-portable` the command does nothing and
+    with the default it still installs the portable entry.
+  - Prints a per-file report (`Path`, `State`, `Outcome`, `Changed`, legacy note, dry-run note) and sets
+    exit code 1 on `Outcome: failed`.
 
 ### TypeScript Contract Verification Command (`src/commands/check.ts`)
 
@@ -1052,3 +1075,89 @@ export interface SymbolInspection {
   3. **Prefix / Path Match**: Matches namespaces or file paths (`identifier LIKE ? || '%' ESCAPE '\' OR file_path = ?`).
 - **SQL Injection Prevention (`escapeLikePattern`)**: The module-level helper escapes `%`, `_`, and `\` before binding to LIKE clauses; `neighbors` reuses the same entity-resolution tiers through `resolveEntityByIdentifier`.
 - **Graph & Observation Aggregation**: Fetches outgoing dependencies, incoming dependents, a bounded depth-1 neighbor traversal from the same implementation as `neighbors`, and all linked memory observations, returning a complete 360-degree topological view of the symbol.
+
+## 7. Agent Setup — Portable MCP Configuration
+
+`src/setup/portable.ts` implements iteration 1 of the agent-setup feature. It installs one
+project-agnostic MCP entry in `{home}/.muninn/mcp.json`; `src/commands/setup.ts` renders its reports and
+`src/cli.ts` routes `muninn setup`. There is no `src/setup/registry.ts` yet, no TOML writer, and no
+rules-file writer. Those requirements (REQ-17, REQ-21–REQ-22, and the agent/TOML parts of REQ-18–REQ-25)
+remain planned in [`plan.md`](./plan.md); the authoritative desired behavior is in [`SPEC.md`](./SPEC.md).
+
+### Scope and data flow
+
+```mermaid
+flowchart TD
+    CLI["muninn setup"] --> HOME["resolvePortablePaths(homeDir?)"]
+    HOME --> CONFIG["{home}/.muninn/mcp.json"]
+    HOME --> LEGACY["{home}/.huginn/mcp.json (read-only)"]
+    CONFIG --> CHECK["checkDocPath + lstat + JSON.parse"]
+    LEGACY --> CHECK
+    CHECK --> CLASSIFY{"state"}
+    CLASSIFY -- absent / legacy --> WRITE["merge mcpServers.muninn"]
+    CLASSIFY -- registered --> PRESENT["present (no write)"]
+    CLASSIFY -- conflict --> FORCE{"--force?"}
+    FORCE -- no --> SKIP["skipped (no write)"]
+    FORCE -- yes --> WRITE
+    CLASSIFY -- malformed --> FAIL["failed, exit 1"]
+    WRITE --> ATOMIC["exclusive temp file + fsync + rename"]
+```
+
+`resolvePortablePaths` resolves the selected home (default `os.homedir()`) with platform path APIs and
+derives `configPath = {home}/.muninn/mcp.json` and `legacyPath = {home}/.huginn/mcp.json`. The legacy
+file is only inspected for diagnostics; setup never reads its content into the result and never writes
+to it. The canonical entry is:
+
+```json
+{ "command": "muninn", "args": ["mcp", "run"] }
+```
+
+It deliberately contains no `--project`, because the portable file is shared by every project using
+that home directory.
+
+### State classification
+
+| State | Condition | Normal outcome |
+|---|---|---|
+| `absent` | Config file missing and no legacy file, or JSON has no `mcpServers.muninn` | `written` |
+| `legacy` | Config file missing but `{home}/.huginn/mcp.json` exists | `written`, legacy reported |
+| `registered` | `mcpServers.muninn` is exactly the canonical entry (only `command` and `args` keys) | `present`, no write |
+| `conflict` | Entry is usable but not exactly canonical (different command/args or extra keys such as `env`) | `skipped` unless `--force`, then `written` |
+| `malformed` | Invalid JSON, non-object root/`mcpServers`/entry, non-string `command`, non-string-array `args`, non-regular file, symlink, or path-check failure | `failed`, exit 1 |
+
+The root must be a JSON object. `mcpServers`, when present, must be an object; a missing `muninn` key is
+`absent`, not malformed. An entry with a string `command` and string-array `args` is usable; extra keys
+make it a conflict rather than malformed. A final-component symlink is reported as malformed/unsafe by
+the path check before its content is read.
+
+### Write behavior and safety
+
+- `setupPortable` builds the next document by shallow-copying the parsed root, preserving all unrelated
+  top-level keys and all other `mcpServers` entries, then replacing only `mcpServers.muninn`.
+- A `registered` entry produces no write and keeps the file byte-identical. A `conflict` without
+  `--force` also produces no write. With `--force`, the canonical entry replaces the conflicting one,
+  so extra keys on that entry are discarded.
+- The writer detects the existing indentation from the first nested JSON property and otherwise uses
+  two spaces. It preserves the original trailing-newline convention; a new file ends with a newline.
+- The config path is screened with `checkDocPath` for the read and again immediately before writing.
+  A final-component symlink is always refused, and the re-check closes the inspection-to-write window.
+  The legacy path is screened before it is `lstat`ed, so a symlinked legacy path is a fatal setup error
+  rather than a followed link.
+- Writes go to `.{basename}.{pid}.{random}.tmp` opened with exclusive `wx`, are `fchmod`ed, `fsync`ed,
+  and renamed into place. Parent directories are created with `0o700`; new files use `0o600`; existing
+  file permissions are preserved. A failed write removes the temporary file and reports `failed`.
+- `--status` uses `getPortableStatus` and `--dry-run` uses the same inspection logic with `dryRun: true`.
+  Neither creates directories, files, or temporary files, and neither changes an existing file's bytes
+  or modification time.
+
+### Reporting and exit codes
+
+Reports include the config path, state, outcome (`written`, `present`, `skipped`, `failed`), `changed`,
+whether the legacy file was present, whether it was a dry run, and an optional sanitized error. The CLI
+prints the same fields; sanitization prevents terminal control characters from corrupting output.
+
+Exit code is `0` for `written`, `present`, nonfatal `skipped`, `--status` on a conflict, and a dry run
+that plans a write or reports present/skipped. It is `1` for `failed` (including a malformed file during
+`--dry-run` or `--status`), an invalid `--home` value, a non-string `--agent`, `--no-portable` without
+`--agent`, or an unknown top-level command. The remaining flags `--no-rules` and `--list` are parsed as
+booleans but currently unused.

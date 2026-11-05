@@ -6,13 +6,13 @@ modules: src/setup/, src/commands/, src/cli.ts, test/
 **Goal:** Developers can install, inspect, and dry-run Muninn’s portable MCP configuration using `muninn setup`.
 
 **Acceptance criteria:**
-- [ ] `muninn setup` creates `{home}/.muninn/mcp.json` with a `mcpServers.muninn` entry invoking `muninn mcp run`; it does not pin a project path. [REQ-18, REQ-19]
-- [ ] `--portable` is accepted as equivalent to omitting `--agent`; `--no-portable` without `--agent` reports invalid usage, displays usage, and exits 1. [REQ-18, REQ-25]
-- [ ] `--status` reports the portable entry as `absent`, `registered`, `legacy`, `conflict`, or `malformed`; malformed JSON is reported with its path and cause and exits 1. [REQ-23, REQ-25]
-- [ ] `--dry-run` reports the intended portable action without writing files, creating directories, or creating temporaries. [REQ-23]
-- [ ] Writes preserve existing permissions or use `0o600` for new files, create parent directories with `0o700`, use an exclusive random temporary file and atomic rename, and reject a final-component symlink. [REQ-20]
-- [ ] A different existing `muninn` entry is left unchanged and reported as `skipped` without `--force`; with `--force`, it is replaced. Correct entries remain byte-identical and report `changed: false`. [REQ-19, REQ-20]
-- [ ] Tests exercise portable creation, safe merge, conflict and force behavior, malformed JSON, idempotency, dry-run read-only behavior, and symlink rejection. [AC-19, AC-20, AC-23]
+- [x] `muninn setup` creates `{home}/.muninn/mcp.json` with a `mcpServers.muninn` entry invoking `muninn mcp run`; it does not pin a project path. [REQ-18, REQ-19]
+- [x] `--portable` is accepted as equivalent to omitting `--agent`; `--no-portable` without `--agent` reports invalid usage, displays usage, and exits 1. [REQ-18, REQ-25]
+- [x] `--status` reports the portable entry as `absent`, `registered`, `legacy`, `conflict`, or `malformed`; malformed JSON is reported with its path and cause and exits 1. [REQ-23, REQ-25]
+- [x] `--dry-run` reports the intended portable action without writing files, creating directories, or creating temporaries. [REQ-23]
+- [x] Writes preserve existing permissions or use `0o600` for new files, create parent directories with `0o700`, use an exclusive random temporary file and atomic rename, and reject a final-component symlink. [REQ-20]
+- [x] A different existing `muninn` entry is left unchanged and reported as `skipped` without `--force`; with `--force`, it is replaced. Correct entries remain byte-identical and report `changed: false`. [REQ-19, REQ-20]
+- [x] Tests exercise portable creation, safe merge, conflict and force behavior, malformed JSON, idempotency, dry-run read-only behavior, and symlink rejection. [AC-19, AC-20, AC-23]
 
 **Verification:**
 ```sh

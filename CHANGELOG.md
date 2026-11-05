@@ -30,6 +30,13 @@
   (`expandGraph` / `expand_graph` can disable it), and `muninn_inspect_symbol` now adds a bounded
   depth-1 neighbor traversal while retaining its existing inspection data. No new MCP tool, schema
   element, inferred relationship, or dependency was added.
+- Portable agent setup: `muninn setup` installs or merges a `muninn mcp run` entry under
+  `mcpServers.muninn` in `{home}/.muninn/mcp.json`, with `--home`, `--force`, `--dry-run`, `--status`,
+  and `--portable`. It preserves unrelated JSON, never modifies `{home}/.huginn/mcp.json`, is
+  byte-for-byte idempotent for a correct entry, and reports `absent` / `registered` / `legacy` /
+  `conflict` / `malformed` states. Writes use exclusive temporary files, atomic rename, mode `0o600`
+  for new files, `0o700` for new directories, and refuse final-component symlinks. The agent catalog,
+  Codex TOML, `--list`, and rules-block installation are planned but not implemented yet.
 
 ## 0.1.0
 

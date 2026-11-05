@@ -36,6 +36,10 @@ package with no dependency on the orchestrator.
 - **Contract verification** — the same TypeScript execution-contract check as a CLI command
   (`muninn check`) and as the `muninn_verify_contract` MCP tool.
 - **JSONL sync** — export/import the whole memory as portable line-delimited JSON.
+- **Portable agent setup** — `muninn setup` installs a project-agnostic `muninn` entry in
+  `{home}/.muninn/mcp.json`, merging existing JSON without disturbing other servers. It supports
+  `--status`, `--dry-run`, `--force`, and `--home`. Agent-specific configuration files and rules
+  blocks are not installed yet.
 - **Local-first and self-contained** — no embeddings, no network, no server: one SQLite file
   and one process.
 
@@ -73,6 +77,8 @@ muninn memory brief  [--project <path>] [--paths a,b] [--budget <n>] [--db <path
 muninn check [files...] [--project <path>]
 
 muninn mcp run [--db <path>] [--project <path>]
+
+muninn setup [--portable] [--no-portable] [--force] [--dry-run] [--status] [--home <path>]
 ```
 
 The database resolves to `<git-root>/.huginn/muninn.db` inside a repository and to
@@ -105,11 +111,15 @@ Register Muninn with any MCP-capable agent. For example, a Claude Code / Codex /
 ```
 
 OpenCode uses the same shape under the `mcp` key with `"type": "local"` and a `command` array.
-Huginn's `huginn setup` writes this for you in every runtime it knows about.
 
 ```sh
 muninn mcp run --project .
 ```
+
+The current `muninn setup` implementation writes only the portable destination. Agent-specific
+configuration files, catalog listing, TOML merging, and rules blocks are described in `SPEC.md` and
+`plan.md` but are not implemented yet; use the agent's own configuration or Huginn's integrator for
+those until they land.
 
 The `muninn_save` tool accepts `supersedesTopicKey` / `supersedes_topic_key`, and
 `muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`. Existing
@@ -120,6 +130,34 @@ default.
 (default 8,000, maximum 20,000), and `expandGraph` / `expand_graph` (default `true`, disabling the
 related-symbol expansion). It returns the shared service-rendered Markdown directly, not a JSON
 wrapper, and does not create or initialize a database when called on a default server.
+
+## Agent Setup
+
+`muninn setup` currently manages one destination: `{home}/.muninn/mcp.json`.
+
+```sh
+muninn setup                          # write/merge the portable entry
+muninn setup --status                 # report state without writing
+muninn setup --dry-run                # report the intended write without writing
+muninn setup --force                  # replace a different existing muninn entry
+muninn setup --home /tmp/test-home    # use a different home directory
+```
+
+The generated entry is `{ "command": "muninn", "args": ["mcp", "run"] }` under `mcpServers.muninn`.
+It never pins `--project`, so the same user-level config works across repositories. Setup merges the
+entry into existing JSON, preserves unrelated keys and servers, and leaves the legacy
+`{home}/.huginn/mcp.json` untouched (it only reports it when present).
+
+Diagnostic states are `absent`, `registered`, `legacy`, `conflict`, and `malformed`. A conflicting
+entry is skipped without `--force`; malformed JSON, a non-regular file, a final-component symlink, or
+a protected path fails with exit code 1. Writes are atomic, new files use mode `0o600`, new parent
+directories use `0o700`, and existing permissions are preserved. Re-running setup over a correct
+entry is byte-for-byte idempotent and reports `changed: false`.
+
+`--no-portable` is accepted only with `--agent`, but the agent catalog and rules installation are not
+implemented yet. With `--agent` alone the command still installs the portable entry and ignores the
+selection; `--agent ... --no-portable` currently performs no work and does not modify any agent
+configuration.
 
 ## Architecture
 
@@ -138,6 +176,7 @@ flowchart LR
     Indexer["AST indexer\nTypeScript Compiler API"] --> Service
     CLI --> Verifier["Contract verifier\nTypeScript Compiler API"]
     MCP --> Verifier
+    CLI --> Setup["Portable setup\n{home}/.muninn/mcp.json"]
 ```
 
 See [`DESIGN.md`](./DESIGN.md) for the schema, service transactions, MCP validation pipeline, CLI
@@ -235,13 +274,16 @@ Muninn has no required environment variables. Configuration is passed as CLI fla
   the tests in `test/db.test.ts` and `test/service.test.ts`).
 - The MCP stdio transport is bounded and survives a dead parent instead of crashing or hanging.
 - MCP tool inputs are validated with zod; unknown tools and bad arguments fail closed.
+- Setup screens its config and legacy paths with the path-safety helper, refuses a final-component
+  symlink, merges only the `muninn` entry, and writes through an exclusive temporary file + atomic
+  rename. Neither `--status` nor `--dry-run` creates files or directories.
 
 ## Available Scripts
 
 ```sh
 npm run dev        # run src/cli.ts directly with Bun
 npm run build      # tsc -> dist/ (+ schema.sql, +x cli.js)
-npm test           # vitest run (storage, service, session brief, indexer, MCP, CLI, contracts)
+npm test           # vitest run (storage, service, session brief, graph, indexer, MCP, CLI, contracts, setup)
 npm run test:watch # vitest in watch mode
 npm run typecheck  # tsc --noEmit
 npm run prepublishOnly  # build + test + typecheck (npm lifecycle hook)
@@ -276,14 +318,15 @@ section from [`CHANGELOG.md`](./CHANGELOG.md).
 ```text
 src/
   cli.ts                 argument parsing, command routing, process entry point
-  commands/              memory (init/search/sync/index/brief), mcp run, check
+  commands/              memory (init/search/sync/index/brief), mcp run, check, setup
   db/                    SQLite client, schema.sql, path and project resolution
   service/               MemoryService: save, search, context, links, sync, stats, brief, neighbors
   indexer/               TypeScript/JavaScript AST symbol and dependency extraction
   mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
   contracts/             in-process TypeScript contract verification
+  setup/                 portable MCP configuration install/diagnose (agent catalog pending)
   util/                  terminal-text sanitizer and path-safety helpers
-test/                    Vitest integration suites for db, service, session brief, graph, indexer, MCP, CLI, contracts
+test/                    Vitest integration suites for db, service, session brief, graph, indexer, MCP, CLI, contracts, setup
 ```
 
 ## Documentation
@@ -292,6 +335,7 @@ test/                    Vitest integration suites for db, service, session brie
 - [`DESIGN.md`](./DESIGN.md) — technical design, schema, data flow and internals.
 - [`ADR.md`](./ADR.md) — architecture decision records and their implementation status.
 - [`CHANGELOG.md`](./CHANGELOG.md) — release notes.
+- [`plan.md`](./plan.md) — staged plan for the agent-setup work.
 - [`AGENTS.md`](./AGENTS.md) — repository conventions for coding agents; no `.opencode/agents/` are defined.
 
 ## Contributing
