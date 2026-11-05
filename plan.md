@@ -29,14 +29,14 @@ modules: src/setup/, src/commands/, src/cli.ts, test/
 **Goal:** Developers can list, diagnose, and configure supported JSON-format agent destinations while retaining the portable configuration by default.
 
 **Acceptance criteria:**
-- [ ] The registry defines all 13 unique agent IDs, labels, formats, MCP paths, and rules-file paths from the reference catalog. [REQ-17]
-- [ ] Path resolution expands `{project}`, `{home}`, and `{opencodeConfigDir}` using platform path APIs and supports `MUNINN_AGENT_<ID>_MCP_PATH` overrides separated by `:`. [REQ-17]
-- [ ] `muninn setup --list` prints the catalog without writing; `--agent` accepts one ID, `all`, or a comma-separated list, and unknown IDs report valid IDs and exit 1. [REQ-17, REQ-18]
-- [ ] JSON `mcpServers` and OpenCode `mcp` destinations receive the correct Muninn entry; only project-contained config paths receive `--project <absolute path>`. [REQ-19]
-- [ ] Setup includes the portable destination by default with selected agents; `--no-portable` suppresses it only when an agent is selected. `--status --agent ...` inspects selected agents plus the portable when applicable; without `--agent`, status inspects all agents plus the portable when applicable. [REQ-18, REQ-23]
-- [ ] Status and dry-run remain read-only. Status reports the MCP diagnostic states and file paths for applicable JSON targets. [REQ-23]
-- [ ] The setup report distinguishes per-destination MCP outcomes (`written`, `present`, `skipped`, `failed`) and identifies each file. [REQ-24]
-- [ ] Tests cover the complete registry, marker resolution, environment overrides, selection, JSON formats, project-path selection, read-only modes, and diagnostic states. [REQ-17–REQ-24]
+- [x] The registry defines all 13 unique agent IDs, labels, formats, MCP paths, and rules-file paths from the reference catalog. [REQ-17]
+- [x] Path resolution expands `{project}`, `{home}`, and `{opencodeConfigDir}` using platform path APIs and supports `MUNINN_AGENT_<ID>_MCP_PATH` overrides separated by `:`. [REQ-17]
+- [x] `muninn setup --list` prints the catalog without writing; `--agent` accepts one ID, `all`, or a comma-separated list, and unknown IDs report valid IDs and exit 1. [REQ-17, REQ-18]
+- [x] JSON `mcpServers` and OpenCode `mcp` destinations receive the correct Muninn entry; only project-contained config paths receive `--project <absolute path>`. [REQ-19]
+- [x] Setup includes the portable destination by default with selected agents; `--no-portable` suppresses it only when an agent is selected. `--status --agent ...` inspects selected agents plus the portable when applicable; without `--agent`, status inspects all agents plus the portable when applicable. [REQ-18, REQ-23]
+- [x] Status and dry-run remain read-only. Status reports the MCP diagnostic states and file paths for applicable JSON targets. [REQ-23]
+- [x] The setup report distinguishes per-destination MCP outcomes (`written`, `present`, `skipped`, `failed`) and identifies each file. [REQ-24]
+- [x] Tests cover the complete registry, marker resolution, environment overrides, selection, JSON formats, project-path selection, read-only modes, and diagnostic states. [REQ-17–REQ-24]
 
 **Verification:**
 ```sh

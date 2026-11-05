@@ -35,8 +35,18 @@
   and `--portable`. It preserves unrelated JSON, never modifies `{home}/.huginn/mcp.json`, is
   byte-for-byte idempotent for a correct entry, and reports `absent` / `registered` / `legacy` /
   `conflict` / `malformed` states. Writes use exclusive temporary files, atomic rename, mode `0o600`
-  for new files, `0o700` for new directories, and refuse final-component symlinks. The agent catalog,
-  Codex TOML, `--list`, and rules-block installation are planned but not implemented yet.
+  for new files, `0o700` for new directories, and refuse final-component symlinks.
+- Agent catalog and JSON setup: `muninn setup --list` prints the 13 reference destinations with their
+  formats, MCP paths, and rules paths without touching the filesystem. `--agent <id|all|id,id>` selects
+  destinations (unknown IDs report the valid list and exit 1), `--project` supplies the project root,
+  and the portable destination is included by default unless `--no-portable` suppresses it. Standard
+  `mcpServers` and OpenCode `mcp` targets are merged structurally, preserve unrelated configuration,
+  pin `--project` only when the config file is inside the selected project, and report per-file
+  `absent` / `registered` / `legacy` / `conflict` / `malformed` states plus `written` / `present` /
+  `skipped` / `failed` outcomes. Path resolution expands `{project}`, `{home}`, and
+  `{opencodeConfigDir}` and honors `MUNINN_AGENT_<ID>_MCP_PATH` (with the equivalent
+  `HUGINN_AGENT_<ID>_MCP_PATH` fallback). Codex TOML and rules-block installation remain planned for
+  later iterations and are reported as deferred rather than silently installed.
 
 ## 0.1.0
 

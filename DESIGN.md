@@ -640,6 +640,7 @@ flowchart TD
 
     CHK --> CHKRUN["verifyTypeScriptContracts(projectRoot, files)"]
 
+    SETUP --> SETUPAGENTS["resolveMcpPaths() / getJsonTargetStatus() / setupJsonTarget()"]
     SETUP --> SETUPPORTABLE["getPortableStatus() / setupPortable()"]
 ```
 
@@ -653,7 +654,7 @@ flowchart TD
      `--json`, `--quiet`, `--force`, `--dry-run`, `--status`, `--portable`, `--no-portable`,
      `--no-rules`, and `--list`.
    - For any flag in `BOOLEAN_FLAGS`, the parser assigns `true` immediately without consuming the next token, preventing flags like `--import` from consuming subsequent positional file paths. Flags outside the set (`--db`, `--project`, `--home`, `--agent`, etc.) consume the next non-flag token as their value.
-   - `--json`, `--quiet`, `--no-rules`, and `--list` are parsed but have no behavior yet. `--import` selects import mode; the setup flags are handled by `handleSetupCommand`.
+   - `--json` and `--quiet` are parsed but have no behavior yet. `--list`, `--agent`, `--project`, `--portable`, `--no-portable`, `--status`, and `--dry-run` are handled by `handleSetupCommand`; `--no-rules` is accepted for forward compatibility but rules are not installed in iteration 2.
 3. **Keyword Disambiguation & Anti-Shadowing**:
    - By partitioning command arguments through `_positionals`, user search queries matching subcommands (e.g. `muninn memory search search`) and filenames matching subcommands (e.g. `muninn memory sync sync`) are parsed without routing ambiguity or argument swallowing.
 4. **Numeric-Looking Values**:
@@ -741,21 +742,32 @@ flowchart TD
     - Installs a `process.stdout` `'error'` handler that logs the EPIPE to `stderr` and turns it into a clean shutdown instead of an unhandled crash mid-response, a no-op `process.stderr` `'error'` handler, and a `server.onerror` logger for protocol failures.
     - On termination, safely shuts down `MemoryService` and closes `MuninnServer` in a `finally` block before exiting.
 
-#### 7. `muninn setup [--portable] [--no-portable] [--force] [--dry-run] [--status] [--home <path>]`
+#### 7. `muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>] [--portable|--no-portable] [--force] [--dry-run] [--status]`
 
-- **Purpose**: Install or diagnose Muninn's portable MCP configuration. Iteration 1 owns only
-  `{home}/.muninn/mcp.json`; the agent catalog, Codex TOML, and rules blocks are not implemented yet.
+- **Purpose**: List, install, or diagnose Muninn's portable configuration and the JSON-format
+  destinations in the 13-agent catalog. Codex TOML and rules blocks are later iterations.
   See §7 and [`plan.md`](./plan.md).
 - **Workflow**:
-  - `--home <path>` overrides the OS home directory (useful for tests); a missing value is a usage error.
-  - `--status` calls `getPortableStatus` and prints path, state, legacy diagnostic, and `Changed: false`
-    without writing. Malformed/unsafe state sets exit code 1; a conflict does not.
-  - Normal execution calls `setupPortable`; `--dry-run` reports the planned outcome without touching
-    the filesystem; `--force` replaces a conflicting entry; `--portable` is equivalent to the default.
-  - `--no-portable` without `--agent` is invalid and exits 1. `--agent` is accepted and validated as a
-    string, but the catalog is not implemented, so with `--no-portable` the command does nothing and
-    with the default it still installs the portable entry.
-  - Prints a per-file report (`Path`, `State`, `Outcome`, `Changed`, legacy note, dry-run note) and sets
+  - `--home <path>` overrides the OS home directory (useful for tests); a missing value is a usage
+    error. `--project <path>` supplies the project root and defaults to the current directory for
+    status/setup.
+  - `--list` prints IDs, labels, formats, resolved/templated MCP paths, and rules paths, then returns
+    before any writer or inspection. It rejects combinations with `--status`, `--dry-run`, `--force`,
+    `--agent`, and `--no-portable`.
+  - `--agent` parses one ID, `all`, or a comma-separated list, deduplicates in catalog order, and reports
+    unknown IDs with the valid list and exit code 1. Without `--agent`, normal setup handles only the
+    portable destination. With a selection, setup processes the selected JSON targets and includes the
+    portable unless `--no-portable` is supplied; `--no-portable` without a selection is invalid.
+  - `--status` inspects the selected agents, or all agents without a selection, plus the portable by
+    default. It continues after per-target errors, reports every state/path, and exits 1 if any
+    destination is malformed or protected. It never writes or creates directories/temporaries.
+  - Normal/dry-run execution calls `setupJsonTarget` per config file and `setupPortable` for the
+    portable row, stopping at the first fatal file error while retaining earlier writes. `--dry-run`
+    reports the same intended outcomes without touching the filesystem; `--force` replaces conflicting
+    or legacy entries.
+  - Codex destinations are listed and reported as skipped with an iteration-3 note rather than being
+    silently installed.
+  - Prints a per-file report (`Path`, `Format`, `State`, `Outcome`, `Changed`, dry-run note) and sets
     exit code 1 on `Outcome: failed`.
 
 ### TypeScript Contract Verification Command (`src/commands/check.ts`)
@@ -1076,15 +1088,39 @@ export interface SymbolInspection {
 - **SQL Injection Prevention (`escapeLikePattern`)**: The module-level helper escapes `%`, `_`, and `\` before binding to LIKE clauses; `neighbors` reuses the same entity-resolution tiers through `resolveEntityByIdentifier`.
 - **Graph & Observation Aggregation**: Fetches outgoing dependencies, incoming dependents, a bounded depth-1 neighbor traversal from the same implementation as `neighbors`, and all linked memory observations, returning a complete 360-degree topological view of the symbol.
 
-## 7. Agent Setup — Portable MCP Configuration
+## 7. Agent Setup — Catalog, JSON Destinations, and Portable MCP Configuration
 
-`src/setup/portable.ts` implements iteration 1 of the agent-setup feature. It installs one
-project-agnostic MCP entry in `{home}/.muninn/mcp.json`; `src/commands/setup.ts` renders its reports and
-`src/cli.ts` routes `muninn setup`. There is no `src/setup/registry.ts` yet, no TOML writer, and no
-rules-file writer. Those requirements (REQ-17, REQ-21–REQ-22, and the agent/TOML parts of REQ-18–REQ-25)
-remain planned in [`plan.md`](./plan.md); the authoritative desired behavior is in [`SPEC.md`](./SPEC.md).
+`src/setup/registry.ts` holds the 13-destination catalog and path resolver; `src/setup/json-target.ts`
+shares JSON inspection, merging, and atomic writing for `mcpServers` and OpenCode `mcp` targets;
+`src/setup/portable.ts` owns `{home}/.muninn/mcp.json` and the legacy diagnostic. `src/commands/setup.ts`
+orchestrates listing, selection, portable-by-default setup, status, dry-run, and per-destination
+reporting, and `src/cli.ts` routes `muninn setup`. Codex TOML writing and rules-file installation
+(REQ-21–REQ-22 and the TOML parts of REQ-18–REQ-25) remain planned in [`plan.md`](./plan.md); the
+authoritative desired behavior is in [`SPEC.md`](./SPEC.md).
 
-### Scope and data flow
+### Catalog and path resolution
+
+The catalog IDs are `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`,
+`commandcode`, `omp`, `mcode`, and `mimo`, with the labels, formats, MCP path templates, and rules-file
+paths from the Huginn integrator reference. `{project}`, `{home}`, and `{opencodeConfigDir}` expand
+with platform path APIs. `MUNINN_AGENT_<ID>_MCP_PATH` replaces a target's paths with a colon-separated
+list (empty segments ignored; an all-empty override is rejected), with
+`HUGINN_AGENT_<ID>_MCP_PATH` accepted as an equivalent fallback. Selection accepts one ID, `all`, or a
+comma-separated list, deduplicates, processes IDs in catalog order, and reports unknown IDs with the
+valid list and exit code 1.
+
+### JSON targets
+
+Standard targets merge `mcpServers.muninn = { command: "muninn", args: ["mcp", "run", ...] }`.
+OpenCode and MiMo merge `mcp.muninn = { type: "local", command: ["muninn", "mcp", "run", ...],
+enabled: true }`. The project pin is added only when the resolved config file is contained in the
+selected project, decided with `path.relative` rather than string prefixes; shared user-level files and
+the portable file never pin a project. The same `absent` / `registered` / `legacy` / `conflict` /
+`malformed` classification and `written` / `present` / `skipped` / `failed` outcomes apply. A legacy
+entry (a Muninn entry whose command is `huginn`) is skipped without `--force` and replaced with it.
+Codex is listed and selected but reported as skipped because TOML writing belongs to iteration 3.
+
+### Portable path, classification, and write flow
 
 ```mermaid
 flowchart TD
@@ -1156,8 +1192,10 @@ Reports include the config path, state, outcome (`written`, `present`, `skipped`
 whether the legacy file was present, whether it was a dry run, and an optional sanitized error. The CLI
 prints the same fields; sanitization prevents terminal control characters from corrupting output.
 
-Exit code is `0` for `written`, `present`, nonfatal `skipped`, `--status` on a conflict, and a dry run
-that plans a write or reports present/skipped. It is `1` for `failed` (including a malformed file during
-`--dry-run` or `--status`), an invalid `--home` value, a non-string `--agent`, `--no-portable` without
-`--agent`, or an unknown top-level command. The remaining flags `--no-rules` and `--list` are parsed as
-booleans but currently unused.
+Exit code is `0` for `written`, `present`, nonfatal `skipped`, `--status` on a conflict, a dry run that
+plans a write or reports present/skipped, and a successful `--list`. It is `1` for `failed` (including a
+malformed file during `--dry-run` or `--status`), an invalid `--home` or `--project` value, a non-string
+or unknown `--agent`, `--no-portable` without `--agent`, an incompatible `--list` combination, or an
+unknown top-level command. Normal setup and dry-run stop at the first fatal file error and retain earlier
+successful writes; status continues through all applicable destinations and reports every error.
+`--no-rules` is accepted for forward compatibility but rules are not read or written in iteration 2.

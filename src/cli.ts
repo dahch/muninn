@@ -100,13 +100,14 @@ Usage:
   muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
   muninn check [files...] [--project <path>]
   muninn mcp run [--db <path>] [--project <path>]
-  muninn setup [--portable|--no-portable] [--force] [--dry-run] [--status] [--home <path>]
+  muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>]
+               [--portable|--no-portable] [--force] [--dry-run] [--status]
 
 Commands:
   memory  query and manage the persistent codebase memory (init, search, sync, index, brief)
   mcp     start the Muninn MCP server for agent memory integration (run)
   check   verify TypeScript execution contracts and pre-emit diagnostics
-  setup   install and diagnose Muninn agent integrations, starting with the portable MCP config
+  setup   list, install, and diagnose Muninn agent and portable MCP configurations
 
 Storage:
   The database resolves to <git-root>/.huginn/muninn.db inside a repository and

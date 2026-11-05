@@ -2,11 +2,12 @@
 
 Muninn is a standalone, local-first memory engine for coding agents and developers. It stores project observations in SQLite, supports lexical search and code-symbol indexing, and exposes memory operations through a library, CLI, and MCP server. It also provides read-only session bootstrap and bounded dependency-neighbor recovery. This specification adds autonomous setup for configuring Muninn in supported agents, including a portable MCP configuration and optional agent rules, without requiring Huginn.
 
-> **Implementation status (2026-11-05):** iteration 1 implements the portable destination only:
-> `muninn setup` writes/merges `{home}/.muninn/mcp.json` and supports `--home`, `--force`, `--dry-run`,
-> `--status`, and `--portable`. The agent catalog (REQ-17), `--list`/`--agent` selection, Codex TOML
-> (REQ-19), and rules installation (REQ-21–REQ-22) are specified here but remain planned work in
-> [`plan.md`](./plan.md). Treat those requirements as the target contract, not current behavior.
+> **Implementation status:** iteration 2 implements the portable destination plus the 13-entry agent
+> catalog, `--list`/`--agent` selection, marker and `MUNINN_AGENT_<ID>_MCP_PATH` resolution, and the
+> JSON `mcpServers` / OpenCode `mcp` writers with project-path containment. Codex TOML (the Codex part
+> of REQ-19) and rules installation (REQ-21–REQ-22) remain planned work in [`plan.md`](./plan.md);
+> selecting Codex is reported as skipped until iteration 3. Treat the unimplemented requirements as the
+> target contract, not current behavior.
 
 ## Goals
 
@@ -190,8 +191,8 @@ Muninn is a standalone, local-first memory engine for coding agents and develope
 - An unknown agent ID is reported with the valid IDs and returns exit code 1.
 - With no `--agent`, setup processes only the portable configuration and does not modify any rules file.
 - `--portable` is accepted and is equivalent to omitting `--agent`.
-- *Current iteration 1:* `--agent` is parsed and type-checked, but no catalog or rules file exists yet;
-  `--no-portable` with `--agent` performs no work, and `--list` is parsed but unused.
+- *Current implementation:* the catalog, selection, `--list`, and JSON destinations are implemented;
+  Codex TOML is deferred to iteration 3 and is reported as skipped rather than silently installed.
 - With `--agent`, setup processes the selected destinations and the portable configuration unless `--no-portable` is supplied.
 - `--no-portable` without `--agent` is invalid, reports that there is nothing to do, shows usage, and returns exit code 1.
 - `--list` prints IDs, labels, formats, resolved or templated paths, and rules files without modifying files or creating directories.

@@ -3,8 +3,9 @@
 Decisions are listed in recording order. `ADR-1`–`ADR-3` are implemented in the current codebase.
 `ADR-4`–`ADR-10` were recorded retroactively from the 0.1.0 codebase so the existing architecture has
 an explicit history. `ADR-11` records a correction to the dependency relation set described in
-`ADR-6`. `ADR-12`–`ADR-14` are proposed setup work; `ADR-15` records the portable-only slice that is
-actually implemented.
+`ADR-6`. `ADR-12`–`ADR-14` describe the full setup contract; `ADR-15` and `ADR-16` record the two
+implemented slices (the portable destination first, then the agent catalog with JSON destinations).
+Codex TOML and rules installation remain proposed work.
 
 ## ADR-1: Track decision supersession in observation rows
 
@@ -233,3 +234,26 @@ actually implemented.
   manual setup or Huginn's integrator until later iterations. Documentation must not claim those
   destinations work. Adding them should reuse the same path-safety and atomic-write rules rather than
   creating a second setup path.
+
+## ADR-16: Implement the agent catalog and JSON destinations after the portable slice
+
+- **Date**: 2026-11-05
+- **Status**: Accepted and implemented for the catalog and JSON destinations
+- **Context**: ADR-15 delivered only the portable file, so users still had to edit every agent
+  configuration by hand. ADR-12 proposed a Muninn-owned catalog and ADR-13 proposed structural
+  per-file merging, including Codex TOML. Adding catalog selection and JSON writing together is a
+  coherent next slice; adding TOML and rules at the same time would mix three different compatibility
+  and safety surfaces in one change.
+- **Decision**: Add the 13-destination catalog and path resolver, agent selection (`--agent`,
+  `all`, comma-separated IDs), read-only `--list`, and per-target status. Implement structural merging
+  for standard `mcpServers` targets and OpenCode/MiMo `mcp` targets, preserving unrelated entries and
+  adding `--project <absolute path>` only when the target file is inside the selected project. Keep the
+  portable destination included by default unless `--no-portable` is supplied. Report selected Codex
+  targets as skipped because TOML writing remains unimplemented.
+- **Consequences**: Users can configure the JSON-format agents without Huginn, and the catalog plus
+  environment overrides become part of Muninn's compatibility contract. The catalog duplicates the
+  Huginn integrator reference and must be coordinated with it. Codex still needs manual configuration,
+  rules files are still untouched, and the TOML/rules requirements in ADR-13 and ADR-14 remain
+  proposed. The JSON writer reuses the portable writer's path screening, atomic temporary-file
+  replacement, permission handling, conflict rules, and idempotent no-op behavior instead of creating
+  a second setup path.

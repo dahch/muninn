@@ -36,8 +36,9 @@ Vitest default; the repository config sets a 20-second timeout.
 - `src/indexer/` — TypeScript/JavaScript AST extraction and dependency indexing.
 - `src/mcp/` — MCP server, tool registry, Zod schemas, argument normalization, bounded stdio.
 - `src/commands/` — CLI handlers for memory, MCP, contract verification, and setup.
-- `src/setup/` — currently the portable MCP configuration installer/diagnostic; the agent catalog and
-  rules writers described in `SPEC.md` are not implemented yet.
+- `src/setup/` — agent catalog and path resolution (`registry.ts`), JSON `mcpServers` / OpenCode `mcp`
+  target merging (`json-target.ts`), and the portable MCP configuration installer/diagnostic
+  (`portable.ts`). Codex TOML and rules writers described in `SPEC.md` are not implemented yet.
 - `src/contracts/` — in-process TypeScript contract verification.
 - `src/util/` — terminal sanitization and path safety.
 
@@ -60,11 +61,12 @@ for the staged setup scope.
   consistent.
 - Protected database and JSONL paths go through `assertDocPath`; do not bypass symlink or containment
   checks.
-- Setup configuration and legacy paths go through `checkDocPath`; the legacy file is read-only, a final
-  symlink is refused, writes are atomic with exclusive temporary files, and `--status`/`--dry-run`
-  must not create or modify anything.
-- Setup preserves unrelated JSON data and leaves a conflicting `muninn` entry untouched unless
-  `--force` is supplied. A correct entry is byte-for-byte idempotent.
+- Setup configuration, target, and legacy paths go through `checkDocPath`; the legacy file is
+  read-only, a final symlink is refused, writes are atomic with exclusive temporary files, and
+  `--status`/`--dry-run` must not create or modify anything.
+- Setup preserves unrelated JSON data and `mcpServers` / `mcp` siblings, and leaves a conflicting or
+  legacy `muninn` entry untouched unless `--force` is supplied. A correct entry is byte-for-byte
+  idempotent.
 - Relative imports use `.js` extensions and TypeScript strict mode is enforced.
 - Add new ADRs to [`ADR.md`](./ADR.md) instead of editing past decisions. Mark unimplemented proposals
   as `Proposed` and keep documentation free of claims that they already exist.

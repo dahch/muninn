@@ -36,10 +36,11 @@ package with no dependency on the orchestrator.
 - **Contract verification** — the same TypeScript execution-contract check as a CLI command
   (`muninn check`) and as the `muninn_verify_contract` MCP tool.
 - **JSONL sync** — export/import the whole memory as portable line-delimited JSON.
-- **Portable agent setup** — `muninn setup` installs a project-agnostic `muninn` entry in
-  `{home}/.muninn/mcp.json`, merging existing JSON without disturbing other servers. It supports
-  `--status`, `--dry-run`, `--force`, and `--home`. Agent-specific configuration files and rules
-  blocks are not installed yet.
+- **Agent setup** — `muninn setup` lists the supported agent catalog and installs a `muninn` MCP
+  entry into standard `mcpServers` and OpenCode `mcp` configurations, plus the project-agnostic
+  portable file at `{home}/.muninn/mcp.json`. It supports `--agent`, `--project`, `--list`,
+  `--status`, `--dry-run`, `--force`, and `--home`, preserves unrelated configuration, and never
+  modifies the legacy Huginn file. Codex TOML and rules blocks are planned for later iterations.
 - **Local-first and self-contained** — no embeddings, no network, no server: one SQLite file
   and one process.
 
@@ -78,7 +79,8 @@ muninn check [files...] [--project <path>]
 
 muninn mcp run [--db <path>] [--project <path>]
 
-muninn setup [--portable] [--no-portable] [--force] [--dry-run] [--status] [--home <path>]
+muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>]
+             [--portable|--no-portable] [--force] [--dry-run] [--status]
 ```
 
 The database resolves to `<git-root>/.huginn/muninn.db` inside a repository and to
@@ -116,10 +118,11 @@ OpenCode uses the same shape under the `mcp` key with `"type": "local"` and a `c
 muninn mcp run --project .
 ```
 
-The current `muninn setup` implementation writes only the portable destination. Agent-specific
-configuration files, catalog listing, TOML merging, and rules blocks are described in `SPEC.md` and
-`plan.md` but are not implemented yet; use the agent's own configuration or Huginn's integrator for
-those until they land.
+`muninn setup --list` shows every supported destination and where its configuration lives. With
+`--agent`, setup merges the `muninn` entry into the selected JSON destinations (and the portable file
+unless `--no-portable` is given); `--project` supplies the absolute project path used by
+project-contained configuration files. Codex TOML merging and rules blocks are described in `SPEC.md`
+and `plan.md` and remain planned work.
 
 The `muninn_save` tool accepts `supersedesTopicKey` / `supersedes_topic_key`, and
 `muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`. Existing
@@ -133,31 +136,44 @@ wrapper, and does not create or initialize a database when called on a default s
 
 ## Agent Setup
 
-`muninn setup` currently manages one destination: `{home}/.muninn/mcp.json`.
+`muninn setup` manages the portable destination `{home}/.muninn/mcp.json` and the JSON-format agent
+destinations in the catalog.
 
 ```sh
-muninn setup                          # write/merge the portable entry
-muninn setup --status                 # report state without writing
-muninn setup --dry-run                # report the intended write without writing
-muninn setup --force                  # replace a different existing muninn entry
-muninn setup --home /tmp/test-home    # use a different home directory
+muninn setup --list                              # print the catalog without writing
+muninn setup                                     # write/merge the portable entry
+muninn setup --agent cursor,pi --project .       # configure selected agents + portable
+muninn setup --agent all --project .             # every catalog destination + portable
+muninn setup --agent opencode --no-portable      # only the selected destination
+muninn setup --status --agent claude --project . # selected agents + portable, read-only
+muninn setup --dry-run --agent all --project .   # report intended actions without writing
 ```
 
-The generated entry is `{ "command": "muninn", "args": ["mcp", "run"] }` under `mcpServers.muninn`.
-It never pins `--project`, so the same user-level config works across repositories. Setup merges the
-entry into existing JSON, preserves unrelated keys and servers, and leaves the legacy
-`{home}/.huginn/mcp.json` untouched (it only reports it when present).
+The catalog is `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`,
+`commandcode`, `omp`, `mcode`, and `mimo`. Path templates expand `{project}`, `{home}`, and
+`{opencodeConfigDir}`; `MUNINN_AGENT_<ID>_MCP_PATH` (colon-separated) overrides a target's paths, and
+`HUGINN_AGENT_<ID>_MCP_PATH` is accepted as an equivalent fallback. `MUNINN_OPENCODE_CONFIG_DIR`
+overrides the OpenCode config directory (`HUGINN_OPENCODE_CONFIG_DIR` is the fallback). Project-contained
+config files get `--project <absolute path>`; shared user-level and portable files never pin a project.
+
+Standard entries are `{ "command": "muninn", "args": ["mcp", "run"] }` under `mcpServers.muninn`.
+OpenCode uses `{ "type": "local", "command": ["muninn", "mcp", "run"], "enabled": true }` under
+`mcp.muninn`. Setup merges only the Muninn entry, preserves unrelated keys and servers, and leaves the
+legacy `{home}/.huginn/mcp.json` untouched (it only reports it when present).
 
 Diagnostic states are `absent`, `registered`, `legacy`, `conflict`, and `malformed`. A conflicting
-entry is skipped without `--force`; malformed JSON, a non-regular file, a final-component symlink, or
-a protected path fails with exit code 1. Writes are atomic, new files use mode `0o600`, new parent
-directories use `0o700`, and existing permissions are preserved. Re-running setup over a correct
-entry is byte-for-byte idempotent and reports `changed: false`.
+entry, or a JSON target whose existing entry still invokes the legacy `huginn` command (`legacy`), is
+skipped without `--force`. For the portable file, `legacy` means the portable config is missing while
+`{home}/.huginn/mcp.json` exists: setup writes the portable entry and only reports the legacy file.
+Malformed JSON, a non-regular file, a final-component symlink, or a protected path fails with exit
+code 1. Writes are atomic, new files use mode `0o600`, new parent directories use `0o700`, and existing
+permissions are preserved. Re-running setup over a correct entry is byte-for-byte idempotent and
+reports `changed: false`. `--list`, `--status`, and `--dry-run` never create or modify files,
+directories, or temporary files.
 
-`--no-portable` is accepted only with `--agent`, but the agent catalog and rules installation are not
-implemented yet. With `--agent` alone the command still installs the portable entry and ignores the
-selection; `--agent ... --no-portable` currently performs no work and does not modify any agent
-configuration.
+Codex is listed with its TOML destination, but TOML installation is deferred to iteration 3 and is
+reported as skipped rather than written. Rules-file paths are recorded in the catalog but rules are
+not read or written yet; `--no-rules` is accepted for forward compatibility.
 
 ## Architecture
 
@@ -176,7 +192,7 @@ flowchart LR
     Indexer["AST indexer\nTypeScript Compiler API"] --> Service
     CLI --> Verifier["Contract verifier\nTypeScript Compiler API"]
     MCP --> Verifier
-    CLI --> Setup["Portable setup\n{home}/.muninn/mcp.json"]
+    CLI --> Setup["Agent setup\nJSON catalog + portable"]
 ```
 
 See [`DESIGN.md`](./DESIGN.md) for the schema, service transactions, MCP validation pipeline, CLI
@@ -263,6 +279,10 @@ Muninn has no required environment variables. Configuration is passed as CLI fla
 |---|---|---|---|
 | `MUNINN_DEBUG` | string (presence is enough) | unset | Emit the `[muninn] mcp run: stdin closed by the client; shutting down.` diagnostic on stderr when the parent closes stdin. |
 | `HUGINN_DEBUG` | string (presence is enough) | unset | Legacy alias for `MUNINN_DEBUG`, retained for Huginn compatibility. |
+| `MUNINN_AGENT_<ID>_MCP_PATH` | string (colon-separated paths) | the catalog paths for that agent | Replace a setup target's MCP configuration paths. `<ID>` is the uppercase agent ID, for example `MUNINN_AGENT_CURSOR_MCP_PATH`; an all-empty override is rejected. |
+| `HUGINN_AGENT_<ID>_MCP_PATH` | string (colon-separated paths) | unset | Legacy fallback for `MUNINN_AGENT_<ID>_MCP_PATH`, retained for Huginn compatibility. |
+| `MUNINN_OPENCODE_CONFIG_DIR` | string (directory path) | `{home}/.config/opencode` | Directory used to expand the OpenCode target's `{opencodeConfigDir}` marker. |
+| `HUGINN_OPENCODE_CONFIG_DIR` | string (directory path) | unset | Legacy fallback for `MUNINN_OPENCODE_CONFIG_DIR`, retained for Huginn compatibility. |
 
 ## Security notes
 
@@ -324,7 +344,8 @@ src/
   indexer/               TypeScript/JavaScript AST symbol and dependency extraction
   mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
   contracts/             in-process TypeScript contract verification
-  setup/                 portable MCP configuration install/diagnose (agent catalog pending)
+  setup/                 agent catalog/path resolution, JSON target merge, portable MCP install/diagnose
+                         (Codex TOML and rules writers pending)
   util/                  terminal-text sanitizer and path-safety helpers
 test/                    Vitest integration suites for db, service, session brief, graph, indexer, MCP, CLI, contracts, setup
 ```

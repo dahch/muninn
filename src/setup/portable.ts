@@ -267,13 +267,13 @@ export function getPortableStatus(options: PortableOptions = {}): PortableStatus
   };
 }
 
-function indentFrom(raw: string | undefined): string {
+export function indentFrom(raw: string | undefined): string {
   if (!raw) return "  ";
   const match = raw.match(/\n([ \t]+)"/);
   return match?.[1] ?? "  ";
 }
 
-function renderConfig(data: Record<string, unknown>, raw: string | undefined): string {
+export function renderConfig(data: Record<string, unknown>, raw: string | undefined): string {
   const body = JSON.stringify(data, null, indentFrom(raw));
   if (raw === undefined) return `${body}\n`;
   // Preserve the original trailing-newline convention when updating a file.
@@ -290,7 +290,7 @@ function buildUpdatedConfig(data: Record<string, unknown>): Record<string, unkno
   return next;
 }
 
-function safeWriteAtomic(targetPath: string, content: string, mode: number): void {
+export function safeWriteAtomic(targetPath: string, content: string, mode: number): void {
   const directory = dirname(targetPath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 
