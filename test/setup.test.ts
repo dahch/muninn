@@ -25,6 +25,14 @@ import {
   getTomlTargetStatus,
   setupTomlTarget,
 } from "../src/setup/toml-target.js";
+import {
+  LEGACY_RULES_END,
+  LEGACY_RULES_START,
+  MUNINN_RULES_END,
+  MUNINN_RULES_START,
+  getRulesTargetStatus,
+  setupRulesTarget,
+} from "../src/setup/rules-target.js";
 import { handleSetupCommand, printSetupUsage } from "../src/commands/setup.js";
 import { VERSION, main, parseArgs, usage } from "../src/cli.js";
 
@@ -1838,5 +1846,346 @@ describe("Codex TOML setup (Iteration 3)", () => {
       if (previous === undefined) delete process.env.MUNINN_AGENT_CODEX_MCP_PATH;
       else process.env.MUNINN_AGENT_CODEX_MCP_PATH = previous;
     }
+  });
+});
+
+describe("marked agent rules setup (Iteration 4)", () => {
+  let home: string;
+  let project: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-setup4-home-"));
+    project = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-setup4-project-"));
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = 0;
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    process.exitCode = 0;
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  });
+
+  function loggedText(): string {
+    return [
+      ...logSpy.mock.calls.map((call: unknown[]) => call.join(" ")),
+      ...errorSpy.mock.calls.map((call: unknown[]) => call.join(" ")),
+    ].join("\n");
+  }
+
+  function occurrences(raw: string, marker: string): number {
+    return raw.split(marker).length - 1;
+  }
+
+  function rulesPathFor(id: string): string {
+    return path.join(project, AGENT_REGISTRY[id as keyof typeof AGENT_REGISTRY].rulesFile);
+  }
+
+  it("installs a marked block by default for selected agents and remains idempotent", async () => {
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor,pi",
+      "--no-portable": true,
+    });
+
+    expect(process.exitCode).toBe(0);
+    for (const rulesPath of [rulesPathFor("cursor"), rulesPathFor("pi")]) {
+      const content = fs.readFileSync(rulesPath, "utf8");
+      expect(content).toContain(MUNINN_RULES_START);
+      expect(content).toContain(MUNINN_RULES_END);
+      expect(content).toContain("muninn_bootstrap");
+      expect(content).toContain("muninn_search");
+      expect(content).toContain("muninn_inspect_symbol");
+      expect(content).toContain("muninn_verify_contract");
+      expect(content).not.toMatch(/huginn/i);
+      expect(occurrences(content, MUNINN_RULES_START)).toBe(1);
+    }
+
+    const before = fs.readFileSync(rulesPathFor("cursor"));
+    const beforeStat = fs.statSync(rulesPathFor("cursor"));
+    logSpy.mockClear();
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor",
+      "--no-portable": true,
+    });
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("Outcome: present");
+    expect(loggedText()).toContain("Changed: false");
+    expect(fs.readFileSync(rulesPathFor("cursor"))).toEqual(before);
+    expect(fs.statSync(rulesPathFor("cursor")).mtimeMs).toBe(beforeStat.mtimeMs);
+  });
+
+  it("appends to existing rules, preserves surrounding content and permissions, and replaces only its own block", () => {
+    const rulesPath = rulesPathFor("cursor");
+    const original = "# Project rules\n\nKeep this line.\n";
+    fs.writeFileSync(rulesPath, original, { mode: 0o640 });
+    fs.chmodSync(rulesPath, 0o640);
+
+    const first = setupRulesTarget({ path: rulesPath, agents: ["cursor"], projectPath: project });
+    expect(first.outcome).toBe("written");
+    const appended = fs.readFileSync(rulesPath, "utf8");
+    expect(appended.startsWith(original)).toBe(true);
+    expect(appended).toContain(MUNINN_RULES_START);
+    expect(fs.statSync(rulesPath).mode & 0o777).toBe(0o640);
+
+    const edited = appended.replace(
+      `${MUNINN_RULES_START}\n## Muninn project memory`,
+      `${MUNINN_RULES_START}\nold managed text`,
+    );
+    fs.writeFileSync(rulesPath, edited);
+    const replaced = setupRulesTarget({ path: rulesPath, agents: ["cursor"], projectPath: project });
+    expect(replaced.outcome).toBe("written");
+    const next = fs.readFileSync(rulesPath, "utf8");
+    expect(next.startsWith(original)).toBe(true);
+    expect(next).not.toContain("old managed text");
+    expect(occurrences(next, MUNINN_RULES_START)).toBe(1);
+  });
+
+  it("deduplicates a shared rules file for multiple selected agents", async () => {
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "opencode,codex",
+      "--no-portable": true,
+    });
+
+    expect(process.exitCode).toBe(0);
+    const shared = path.join(project, "AGENTS.md");
+    const content = fs.readFileSync(shared, "utf8");
+    expect(occurrences(content, MUNINN_RULES_START)).toBe(1);
+    expect(loggedText()).toContain(`Muninn rules (opencode, codex)`);
+    expect(loggedText()).toContain(shared);
+  });
+
+  it("reports a legacy block as stale, preserves it without --force, and replaces it with --force", () => {
+    const rulesPath = path.join(project, "AGENTS.md");
+    const original =
+      "before\n" +
+      `${LEGACY_RULES_START}\nold huginn rules\n${LEGACY_RULES_END}\n` +
+      "after\n";
+    fs.writeFileSync(rulesPath, original);
+
+    const staleStatus = getRulesTargetStatus({ path: rulesPath, agents: ["pi"], projectPath: project });
+    expect(staleStatus.state).toBe("stale");
+
+    const stale = setupRulesTarget({ path: rulesPath, agents: ["pi"], projectPath: project });
+    expect(stale.outcome).toBe("stale");
+    expect(stale.changed).toBe(false);
+    expect(fs.readFileSync(rulesPath, "utf8")).toBe(original);
+
+    const forced = setupRulesTarget({
+      path: rulesPath,
+      agents: ["pi"],
+      projectPath: project,
+      force: true,
+    });
+    expect(forced.outcome).toBe("written");
+    const next = fs.readFileSync(rulesPath, "utf8");
+    expect(next).toContain("before\n");
+    expect(next).toContain("after\n");
+    expect(next).toContain(MUNINN_RULES_START);
+    expect(next).not.toContain(LEGACY_RULES_START);
+    expect(occurrences(next, MUNINN_RULES_START)).toBe(1);
+  });
+
+  it("treats unmatched, duplicate, and unterminated legacy markers as fatal without writing", () => {
+    const rulesPath = path.join(project, ".cursorrules");
+    const cases = [
+      `${MUNINN_RULES_START}\nmissing end\n`,
+      `${MUNINN_RULES_START}\none\n${MUNINN_RULES_END}\n${MUNINN_RULES_START}\ntwo\n${MUNINN_RULES_END}\n`,
+      `${LEGACY_RULES_START}\nunterminated\n`,
+    ];
+
+    for (const raw of cases) {
+      fs.writeFileSync(rulesPath, raw);
+      const status = getRulesTargetStatus({ path: rulesPath, agents: ["cursor"], projectPath: project });
+      expect(status.state).toBe("malformed");
+      const report = setupRulesTarget({
+        path: rulesPath,
+        agents: ["cursor"],
+        projectPath: project,
+        force: true,
+      });
+      expect(report.outcome).toBe("failed");
+      expect(fs.readFileSync(rulesPath, "utf8")).toBe(raw);
+    }
+  });
+
+  it("refuses a symlinked rules file and leaves its target untouched", () => {
+    const targetPath = path.join(project, "outside-rules.md");
+    const targetBytes = "do not change\n";
+    fs.writeFileSync(targetPath, targetBytes);
+    const rulesPath = path.join(project, ".cursorrules");
+    fs.symlinkSync(targetPath, rulesPath);
+
+    const status = getRulesTargetStatus({ path: rulesPath, agents: ["cursor"], projectPath: project });
+    expect(status.state).toBe("malformed");
+    expect(status.error?.toLowerCase()).toContain("symlink");
+
+    const report = setupRulesTarget({
+      path: rulesPath,
+      agents: ["cursor"],
+      projectPath: project,
+      force: true,
+    });
+    expect(report.outcome).toBe("failed");
+    expect(fs.readFileSync(targetPath, "utf8")).toBe(targetBytes);
+  });
+
+  it("supports --no-rules and leaves rules untouched when no agent is selected", async () => {
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor",
+      "--no-portable": true,
+      "--no-rules": true,
+    });
+    expect(process.exitCode).toBe(0);
+    expect(fs.existsSync(path.join(project, ".cursor", "mcp.json"))).toBe(true);
+    expect(fs.existsSync(rulesPathFor("cursor"))).toBe(false);
+
+    const sentinel = path.join(project, "AGENTS.md");
+    fs.writeFileSync(sentinel, "human rules only\n");
+    await handleSetupCommand({ "--home": home, "--project": project });
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("human rules only\n");
+    expect(loggedText()).not.toContain("Muninn rules (");
+  });
+
+  it("rejects --no-portable --no-rules without --agent with usage and exit 1", async () => {
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--no-portable": true,
+      "--no-rules": true,
+    });
+    expect(process.exitCode).toBe(1);
+    expect(loggedText()).toContain("--no-portable --no-rules requires --agent");
+    expect(loggedText()).toContain("Usage:");
+    expect(fs.readdirSync(project)).toEqual([]);
+  });
+
+  it("keeps rules status and dry-run read-only", async () => {
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor",
+      "--no-portable": true,
+      "--status": true,
+    });
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("Muninn rules (cursor)");
+    expect(loggedText()).toContain("State:   absent");
+    expect(fs.existsSync(rulesPathFor("cursor"))).toBe(false);
+
+    logSpy.mockClear();
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor",
+      "--no-portable": true,
+      "--dry-run": true,
+    });
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("Muninn rules (cursor)");
+    expect(loggedText()).toContain("Outcome: written");
+    expect(loggedText()).toContain("Dry run: no files were written");
+    expect(fs.existsSync(rulesPathFor("cursor"))).toBe(false);
+  });
+
+  it("stops at the first fatal rules error while retaining earlier MCP writes", async () => {
+    fs.mkdirSync(rulesPathFor("cursor"), { recursive: true });
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor",
+    });
+
+    expect(process.exitCode).toBe(1);
+    expect(fs.existsSync(path.join(project, ".cursor", "mcp.json"))).toBe(true);
+    expect(loggedText()).toContain("Muninn rules (cursor)");
+    expect(loggedText()).toContain("Outcome: failed");
+    expect(fs.existsSync(path.join(home, ".muninn", "mcp.json"))).toBe(false);
+    expect(fs.statSync(rulesPathFor("cursor")).isDirectory()).toBe(true);
+  });
+
+  it("aggregates rules status errors and continues inspecting all selected rules", async () => {
+    fs.mkdirSync(rulesPathFor("cursor"), { recursive: true });
+    fs.writeFileSync(rulesPathFor("pi"), `${MUNINN_RULES_START}\nunmatched\n`);
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor,pi",
+      "--no-portable": true,
+      "--status": true,
+    });
+
+    expect(process.exitCode).toBe(1);
+    const text = loggedText();
+    expect(text).toContain("Muninn rules (cursor)");
+    expect(text).toContain(rulesPathFor("cursor"));
+    expect(text).toContain("Muninn rules (pi)");
+    expect(text).toContain(rulesPathFor("pi"));
+    expect(text).toContain("State:   malformed");
+  });
+
+  it("warns when a selected agent binary is not installed without changing the exit code", async () => {
+    const emptyBin = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-empty-bin-"));
+    const previousPath = process.env.PATH;
+    process.env.PATH = emptyBin;
+    try {
+      await handleSetupCommand({
+        "--home": home,
+        "--project": project,
+        "--agent": "cursor",
+        "--no-portable": true,
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      fs.rmSync(emptyBin, { recursive: true, force: true });
+    }
+
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("not installed");
+    expect(fs.existsSync(path.join(project, ".cursor", "mcp.json"))).toBe(true);
+    expect(fs.existsSync(rulesPathFor("cursor"))).toBe(true);
+  });
+
+  it("creates new rules files with restrictive permissions and reports write failures", () => {
+    const report = setupRulesTarget({
+      path: path.join(project, ".cursorrules"),
+      agents: ["cursor"],
+      projectPath: project,
+    });
+    expect(report.outcome).toBe("written");
+    expect(fs.statSync(path.join(project, ".cursorrules")).mode & 0o777).toBe(0o600);
+
+    const failedPath = path.join(project, "pi-rules", "AGENTS.md");
+    const renameSpy = vi.spyOn(fs, "renameSync").mockImplementationOnce(() => {
+      throw new Error("rename denied");
+    });
+    let failed: ReturnType<typeof setupRulesTarget>;
+    try {
+      failed = setupRulesTarget({ path: failedPath, agents: ["pi"], projectPath: project });
+    } finally {
+      renameSpy.mockRestore();
+    }
+    expect(failed!.outcome).toBe("failed");
+    expect(failed!.error).toContain("rename denied");
+    expect(fs.existsSync(failedPath)).toBe(false);
+    const leftovers = fs
+      .readdirSync(path.dirname(failedPath))
+      .filter((entry) => entry.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
   });
 });

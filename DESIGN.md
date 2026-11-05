@@ -642,6 +642,7 @@ flowchart TD
 
     SETUP --> SETUPAGENTS["resolveMcpPaths() / getJsonTargetStatus() / setupJsonTarget()"]
     SETUP --> SETUPTOML["getTomlTargetStatus() / setupTomlTarget()"]
+    SETUP --> SETUPRULES["getRulesTargetStatus() / setupRulesTarget()"]
     SETUP --> SETUPPORTABLE["getPortableStatus() / setupPortable()"]
 ```
 
@@ -655,7 +656,7 @@ flowchart TD
      `--json`, `--quiet`, `--force`, `--dry-run`, `--status`, `--portable`, `--no-portable`,
      `--no-rules`, and `--list`.
    - For any flag in `BOOLEAN_FLAGS`, the parser assigns `true` immediately without consuming the next token, preventing flags like `--import` from consuming subsequent positional file paths. Flags outside the set (`--db`, `--project`, `--home`, `--agent`, etc.) consume the next non-flag token as their value.
-   - `--json` and `--quiet` are parsed but have no behavior yet. `--list`, `--agent`, `--project`, `--portable`, `--no-portable`, `--status`, and `--dry-run` are handled by `handleSetupCommand`; `--no-rules` is accepted for forward compatibility but rules are not installed yet.
+   - `--json` and `--quiet` are parsed but have no behavior yet. `--list`, `--agent`, `--project`, `--portable`, `--no-portable`, `--no-rules`, `--status`, and `--dry-run` are handled by `handleSetupCommand`.
 3. **Keyword Disambiguation & Anti-Shadowing**:
    - By partitioning command arguments through `_positionals`, user search queries matching subcommands (e.g. `muninn memory search search`) and filenames matching subcommands (e.g. `muninn memory sync sync`) are parsed without routing ambiguity or argument swallowing.
 4. **Numeric-Looking Values**:
@@ -743,11 +744,11 @@ flowchart TD
     - Installs a `process.stdout` `'error'` handler that logs the EPIPE to `stderr` and turns it into a clean shutdown instead of an unhandled crash mid-response, a no-op `process.stderr` `'error'` handler, and a `server.onerror` logger for protocol failures.
     - On termination, safely shuts down `MemoryService` and closes `MuninnServer` in a `finally` block before exiting.
 
-#### 7. `muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>] [--portable|--no-portable] [--force] [--dry-run] [--status]`
+#### 7. `muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>] [--portable|--no-portable] [--no-rules] [--force] [--dry-run] [--status]`
 
 - **Purpose**: List, install, or diagnose Muninn's portable configuration, the JSON-format
-  destinations, and the Codex TOML destination in the 13-agent catalog. Rules blocks are a later
-  iteration. See §7 and [`plan.md`](./plan.md).
+  destinations, the Codex TOML destination, and marked rules blocks in the 13-agent catalog. See §7
+  and [`plan.md`](./plan.md).
 - **Workflow**:
   - `--home <path>` overrides the OS home directory (useful for tests); a missing value is a usage
     error. `--project <path>` supplies the project root and defaults to the current directory for
@@ -757,22 +758,30 @@ flowchart TD
     `--agent`, and `--no-portable`.
   - `--agent` parses one ID, `all`, or a comma-separated list, deduplicates in catalog order, and reports
     unknown IDs with the valid list and exit code 1. Without `--agent`, normal setup handles only the
-    portable destination. With a selection, setup processes the selected JSON and Codex TOML targets
-    and includes the portable unless `--no-portable` is supplied; `--no-portable` without a selection
-    is invalid.
+    portable destination and leaves rules files unread and unwritten. With a selection, setup processes
+    the selected JSON and Codex TOML targets, installs rules unless `--no-rules` is supplied, and
+    includes the portable unless `--no-portable` is supplied; `--no-portable` without a selection, or
+    `--no-portable --no-rules` without a selection, is invalid.
   - `--status` inspects the selected agents, or all agents without a selection, plus the portable by
     default. It continues after per-target errors, reports every state/path, and exits 1 if any
     destination is malformed or protected. It never writes or creates directories/temporaries.
-  - Normal/dry-run execution calls `setupJsonTarget` or `setupTomlTarget` per config file and
-    `setupPortable` for the portable row, stopping at the first fatal file error while retaining
-    earlier writes. `--dry-run` reports the same intended outcomes without touching the filesystem;
-    `--force` replaces conflicting or legacy entries.
+  - Normal/dry-run execution calls `setupJsonTarget` or `setupTomlTarget` per config file, then
+    `setupRulesTarget` once per unique resolved rules path, then `setupPortable` for the portable row.
+    It stops at the first fatal file error while retaining earlier writes. `--dry-run` reports the same
+    intended outcomes without touching the filesystem; `--force` replaces conflicting entries or stale
+    legacy rules blocks.
   - Codex uses `setupTomlTarget`: it structurally merges `[mcp_servers.muninn]`, preserves unrelated
     TOML tables, keys, comments, and formatting where feasible, and reports malformed documents with
     their path and cause without writing. `--status` reports the same TOML states and continues
     inspecting the remaining destinations after an error.
-  - Prints a per-file report (`Path`, `Format`, `State`, `Outcome`, `Changed`, dry-run note) and sets
-    exit code 1 on `Outcome: failed`.
+  - Status reports selected rules files after the MCP destinations and before the portable row,
+    aggregates rules path/marker errors across all applicable files, and exits 1 if any are fatal.
+  - Selected agent binaries are probed in `PATH`; a missing binary emits a sanitized `not installed`
+    warning but never changes the exit code or prevents configuration. Installation is not inferred
+    from the presence of a config file.
+  - Prints a per-file MCP report (`Path`, `Format`, `State`, `Outcome`, `Changed`, dry-run note), a
+    separate per-file rules report identifying all agents sharing that file, and sets exit code 1 on
+    `Outcome: failed`.
 
 ### TypeScript Contract Verification Command (`src/commands/check.ts`)
 
@@ -1092,16 +1101,16 @@ export interface SymbolInspection {
 - **SQL Injection Prevention (`escapeLikePattern`)**: The module-level helper escapes `%`, `_`, and `\` before binding to LIKE clauses; `neighbors` reuses the same entity-resolution tiers through `resolveEntityByIdentifier`.
 - **Graph & Observation Aggregation**: Fetches outgoing dependencies, incoming dependents, a bounded depth-1 neighbor traversal from the same implementation as `neighbors`, and all linked memory observations, returning a complete 360-degree topological view of the symbol.
 
-## 7. Agent Setup — Catalog, JSON/TOML Destinations, and Portable MCP Configuration
+## 7. Agent Setup — Catalog, JSON/TOML Destinations, Rules, and Portable MCP Configuration
 
-`src/setup/registry.ts` holds the 13-destination catalog and path resolver; `src/setup/json-target.ts`
-shares JSON inspection, merging, and atomic writing for `mcpServers` and OpenCode `mcp` targets;
-`src/setup/toml-target.ts` provides a dependency-free TOML parser, structural Codex merge, and
-diagnostics; `src/setup/portable.ts` owns `{home}/.muninn/mcp.json` and the legacy diagnostic.
-`src/commands/setup.ts` orchestrates listing, selection, portable-by-default setup, status, dry-run, and
-per-destination reporting, and `src/cli.ts` routes `muninn setup`. Rules-file installation
-(REQ-21–REQ-22) remains planned in [`plan.md`](./plan.md); the authoritative desired behavior is in
-[`SPEC.md`](./SPEC.md).
+`src/setup/registry.ts` holds the 13-destination catalog, path resolver, and deterministic binary
+mapping used for `not installed` warnings; `src/setup/json-target.ts` shares JSON inspection, merging,
+and atomic writing for `mcpServers` and OpenCode `mcp` targets; `src/setup/toml-target.ts` provides a
+dependency-free TOML parser, structural Codex merge, and diagnostics; `src/setup/rules-target.ts` owns
+marked rules inspection, legacy detection, deduplication, and safe writing; `src/setup/portable.ts` owns
+`{home}/.muninn/mcp.json` and the legacy diagnostic. `src/commands/setup.ts` orchestrates listing,
+selection, portable-by-default setup, rules installation, status, dry-run, warnings, and per-destination
+reporting, and `src/cli.ts` routes `muninn setup`. The authoritative behavior is in [`SPEC.md`](./SPEC.md).
 
 ### Catalog and path resolution
 
@@ -1123,6 +1132,28 @@ selected project, decided with `path.relative` rather than string prefixes; shar
 the portable file never pin a project. The same `absent` / `registered` / `legacy` / `conflict` /
 `malformed` classification and `written` / `present` / `skipped` / `failed` outcomes apply. A legacy
 entry (a Muninn entry whose command is `huginn`) is skipped without `--force` and replaced with it.
+
+### Rules targets
+
+Rules are managed per resolved project-contained path, not per agent: selected agents that share a
+rules file (most notably the `AGENTS.md` destinations) are grouped before inspection or writing, so one
+file receives at most one block and one report. The managed block is delimited by
+`<!-- muninn:rules:start -->` and `<!-- muninn:rules:end -->`; it recommends `muninn_bootstrap` at
+session start, `muninn_search` / `muninn_inspect_symbol` before a design change, and
+`muninn_verify_contract` before completion, and never mentions Huginn. A missing file is created only
+on a real write. Existing content is preserved; the block is appended with a stable separator or only
+the managed range is replaced. A matching block is `present`, while a differing managed block is
+rewritten.
+
+A complete `<!-- huginn:muninn-rules:start -->` block is diagnosed as `stale`. Without `--force` it is
+left byte-identical and reported as `stale`; with `--force` it is replaced by the managed block while
+surrounding content remains. Unmatched, duplicate, or end-before-start markers, including an
+unterminated legacy block, are fatal because the safe replacement boundary is ambiguous. Like MCP
+configuration, a rules path is screened with `checkDocPath` for inspection and `assertDocPath`
+immediately before writing, a final symlink or non-regular file is refused, and writes reuse
+`safeWriteAtomic` with existing-mode preservation or `0o600` for new files. Status is read-only and
+reports `absent` / `present` / `stale`; normal and dry-run report `written` / `present` / `stale` /
+`skipped` / `failed`.
 
 ### Codex TOML target
 
@@ -1215,5 +1246,6 @@ plans a write or reports present/skipped, and a successful `--list`. It is `1` f
 malformed file during `--dry-run` or `--status`), an invalid `--home` or `--project` value, a non-string
 or unknown `--agent`, `--no-portable` without `--agent`, an incompatible `--list` combination, or an
 unknown top-level command. Normal setup and dry-run stop at the first fatal file error and retain earlier
-successful writes; status continues through all applicable destinations and reports every error.
-`--no-rules` is accepted for forward compatibility but rules are not read or written yet.
+successful writes; status continues through all applicable destinations and reports every error. Rules
+results use `written`/`present`/`stale`/`skipped`/`failed`, report the shared rules path and its selected
+agents, and never change the MCP outcome or exit code unless the rules operation itself fails.

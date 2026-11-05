@@ -55,7 +55,19 @@
   errors before exiting 1. Duplicate table definitions, including repeated `[mcp_servers.muninn]`
   headers and dotted `mcp_servers.muninn` keys combined with an explicit header, are rejected as
   malformed without modifying the file. Forced replacement may discard comments and formatting inside
-  the replaced Muninn region. Rules-block installation remains planned for a later iteration.
+  the replaced Muninn region.
+- Marked agent rules: `muninn setup --agent <ids>` installs a
+  `<!-- muninn:rules:start -->` / `<!-- muninn:rules:end -->` block recommending `muninn_bootstrap`,
+  `muninn_search`, `muninn_inspect_symbol`, and `muninn_verify_contract`. Blocks are appended or replaced
+  idempotently, surrounding human-authored content is preserved, missing files are created only for a
+  real write, and selected agents that share a rules file receive one deduplicated block. `--no-rules`
+  suppresses rules, and setup without `--agent` never reads or writes a rules file. A complete legacy
+  `huginn:muninn-rules` block is reported as `stale`, left untouched without `--force`, and replaced
+  while preserving surrounding content with `--force`; ambiguous or duplicate markers fail closed.
+  Rules paths use the same containment/symlink checks and atomic writes as MCP configuration, and rules
+  outcomes are reported separately with the shared file and its agents. Status reports `absent`,
+  `present`, or `stale` without writing. A selected agent binary missing from `PATH` now produces a
+  nonfatal `not installed` warning without changing the exit code.
 
 ## 0.1.0
 

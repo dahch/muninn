@@ -3,9 +3,9 @@
 Decisions are listed in recording order. `ADR-1`–`ADR-3` are implemented in the current codebase.
 `ADR-4`–`ADR-10` were recorded retroactively from the 0.1.0 codebase so the existing architecture has
 an explicit history. `ADR-11` records a correction to the dependency relation set described in
-`ADR-6`. `ADR-12`–`ADR-14` describe the full setup contract; `ADR-15`–`ADR-17` record the implemented slices
-(the portable destination first, then the agent catalog with JSON destinations, then Codex TOML).
-Rules installation remains proposed work.
+`ADR-6`. `ADR-12`–`ADR-14` describe the full setup contract; `ADR-15`–`ADR-18` record the implemented slices
+(the portable destination first, then the agent catalog with JSON destinations, Codex TOML, and finally
+marked rules with legacy-block handling).
 
 ## ADR-1: Track decision supersession in observation rows
 
@@ -209,7 +209,7 @@ Rules installation remains proposed work.
 
 ## ADR-14: Manage agent rules as marked human-authored content
 
-- **Status**: Proposed
+- **Status**: Accepted (implemented by ADR-18)
 - **Context**: MCP configuration is machine-readable configuration, while an agent’s rules file is human-authored prose that may contain unrelated instructions. Replacing that file or appending unmarked text risks losing user content or creating duplicate instructions. The Huginn integrator may also have inserted an older Muninn rules block. Alternatives include leaving rule installation entirely manual, replacing whole rules files, or managing a clearly delimited block in place.
 - **Decision**: When setup selects one or more agent destinations, install Muninn usage guidance by default as a marked `muninn:rules` block. Append it to existing rules files or create a missing file, and on later runs replace only Muninn’s own marked block. Detect the prior `huginn:muninn-rules` block as stale: preserve it without `--force`, and replace it with the Muninn block when forced. Do not modify rules files when setup selects no agents or when `--no-rules` is used. Validate rules paths with the same path-safety checks as configuration paths.
 - **Consequences**: Muninn can provide consistent bootstrap and memory-use guidance without taking ownership of surrounding prose. Shared rules files require deduplication across selected destinations. Stale-block replacement requires explicit user authorization, and status and setup reports must identify the affected rules file and distinguish its outcome from the MCP configuration outcome.
@@ -257,7 +257,7 @@ Rules installation remains proposed work.
   proposed. The JSON writer reuses the portable writer's path screening, atomic temporary-file
   replacement, permission handling, conflict rules, and idempotent no-op behavior instead of creating
   a second setup path. The Codex TOML portion of this decision is superseded by ADR-17, which implements
-  the TOML destination; the rules portion remains proposed.
+  the TOML destination; the rules portion is implemented by ADR-18.
 
 ## ADR-17: Parse and merge Codex TOML without a runtime dependency
 
@@ -286,3 +286,32 @@ Rules installation remains proposed work.
   replaced region intact but means unsupported document shapes must fail without writing instead of
   being normalized. Rules-file
   installation remains outside this decision and iteration.
+
+## ADR-18: Install marked rules blocks with shared-file deduplication
+
+- **Date**: 2026-11-05
+- **Status**: Accepted and implemented
+- **Context**: ADR-14 requires usage rules for selected agents but rules files are human-authored prose,
+  unlike machine-oriented MCP configuration. Replacing a whole rules file would destroy unrelated
+  instructions, while appending an unmarked paragraph on every run would create duplicates. Some agents
+  share `AGENTS.md`, and an older Huginn integrator may have left a `huginn:muninn-rules` block whose
+  safe replacement boundary must be recognized explicitly.
+- **Decision**: Implement `src/setup/rules-target.ts` and install marked rules only for an explicit
+  `--agent` selection, unless `--no-rules` is supplied. Group selected agents by resolved project rules
+  path and inspect or write each unique file once. The managed block is delimited by exact
+  `<!-- muninn:rules:start -->` / `<!-- muninn:rules:end -->` markers and recommends
+  `muninn_bootstrap`, `muninn_search`, `muninn_inspect_symbol`, and `muninn_verify_contract` without
+  mentioning Huginn. Append the block to existing content, create a missing file only for a real write,
+  and replace only a complete managed block so surrounding bytes and order are preserved. Recognize a
+  complete legacy `huginn:muninn-rules` block as `stale`; leave it unchanged without `--force` and
+  replace it when forced. Treat unmatched, duplicate, or unterminated markers as fatal. Screen rules
+  paths with `checkDocPath` during inspection and `assertDocPath` immediately before writing, refuse a
+  final symlink or non-regular file, and reuse `safeWriteAtomic` with existing-mode preservation or
+  `0o600` for new files. Keep rules outcomes separate from MCP outcomes, report the shared path and its
+  agents, and keep status/dry-run read-only. Probe the deterministic binary associated with each
+  selected agent and emit a nonfatal `not installed` warning when it is absent from `PATH`.
+- **Consequences**: Muninn can provide consistent bootstrap and memory guidance without taking
+  ownership of human-authored prose, and shared destination files remain free of duplicate blocks.
+  Stale legacy content requires explicit `--force`, ambiguous markers fail closed, and partial setup
+  results are visible as separate MCP and rules rows. Missing agent executables are informational rather
+  than setup failures; Muninn reports installation state, not whether an agent connects to the server.

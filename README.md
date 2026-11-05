@@ -39,9 +39,9 @@ package with no dependency on the orchestrator.
 - **Agent setup** — `muninn setup` lists the supported agent catalog and installs a `muninn` MCP
   entry into standard `mcpServers`, OpenCode `mcp`, and Codex TOML configurations, plus the
   project-agnostic portable file at `{home}/.muninn/mcp.json`. It supports `--agent`, `--project`,
-  `--list`, `--status`, `--dry-run`, `--force`, and `--home`, preserves unrelated configuration, and never
-  modifies the legacy Huginn file. Codex TOML is merged safely; rules blocks are planned for a later
-  iteration.
+  `--list`, `--status`, `--dry-run`, `--force`, `--home`, and `--no-rules`, preserves unrelated
+  configuration, and never modifies the legacy Huginn file. Codex TOML is merged safely, and selected
+  agents receive an idempotent marked rules block with legacy-block detection.
 - **Local-first and self-contained** — no embeddings, no network, no server: one SQLite file
   and one process.
 
@@ -81,7 +81,7 @@ muninn check [files...] [--project <path>]
 muninn mcp run [--db <path>] [--project <path>]
 
 muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>]
-             [--portable|--no-portable] [--force] [--dry-run] [--status]
+             [--portable|--no-portable] [--no-rules] [--force] [--dry-run] [--status]
 ```
 
 The database resolves to `<git-root>/.huginn/muninn.db` inside a repository and to
@@ -120,10 +120,10 @@ muninn mcp run --project .
 ```
 
 `muninn setup --list` shows every supported destination and where its configuration lives. With
-`--agent`, setup merges the `muninn` entry into the selected destinations (JSON or Codex TOML) and the
-portable file unless `--no-portable` is given; `--project` supplies the absolute project path used by
-project-contained configuration files. Codex TOML merging is supported with safe atomic writes and
-read-only diagnostics. Rules blocks remain planned work described in `SPEC.md` and `plan.md`.
+`--agent`, setup merges the `muninn` entry into the selected destinations (JSON or Codex TOML), installs
+marked usage rules unless `--no-rules` is given, and includes the portable file unless `--no-portable`
+is given; `--project` supplies the absolute project path used by project-contained configuration files
+and rules. Codex TOML merging is supported with safe atomic writes and read-only diagnostics.
 
 The `muninn_save` tool accepts `supersedesTopicKey` / `supersedes_topic_key`, and
 `muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`. Existing
@@ -146,6 +146,7 @@ muninn setup                                     # write/merge the portable entr
 muninn setup --agent cursor,pi --project .       # configure selected agents + portable
 muninn setup --agent all --project .             # every catalog destination + portable
 muninn setup --agent opencode --no-portable      # only the selected destination
+muninn setup --agent cursor --no-rules           # configure without installing rules
 muninn setup --status --agent claude --project . # selected agents + portable, read-only
 muninn setup --dry-run --agent all --project .   # report intended actions without writing
 ```
@@ -177,8 +178,24 @@ tables and keys, and applies the same conflict, permission, atomic-write, and sy
 destinations. A forced replacement can discard comments and formatting inside the replaced Muninn
 region; unrelated content outside it is preserved where feasible. Malformed TOML, including duplicate
 table definitions, is reported with its path and cause, leaves the original untouched, and status
-continues to inspect the remaining destinations before exiting 1. Rules-file paths are recorded in the
-catalog but rules are not read or written yet; `--no-rules` is accepted for forward compatibility.
+continues to inspect the remaining destinations before exiting 1.
+
+Selected agents also receive a Markdown rules block delimited by `<!-- muninn:rules:start -->` and
+`<!-- muninn:rules:end -->`. It recommends `muninn_bootstrap` at session start, `muninn_search` and
+`muninn_inspect_symbol` before designing a change, and `muninn_verify_contract` before completing code.
+Setup appends the block to an existing rules file, creates the file only when a write is needed, and
+replaces only its own marked block on later runs. Agents that share a rules file (for example the
+various `AGENTS.md` destinations) receive one deduplicated block. Without `--agent`, rules are neither
+read nor written; `--no-rules` suppresses them for an explicit selection.
+
+A prior `<!-- huginn:muninn-rules:start -->` block is reported as `stale` and left byte-identical
+without `--force`; with `--force` it is replaced while surrounding prose is preserved. Unmatched,
+duplicate, or unterminated managed/legacy markers are fatal and leave the file untouched. Rules paths
+use the same containment and symlink checks as MCP configuration, and writes preserve existing
+permissions or use `0o600` for new files. Status reports `absent`, `present`, or `stale` per rules file
+and identifies the selected agents that share it; normal setup and dry-run report `written`, `present`,
+`stale`, `skipped`, or `failed`. A selected agent binary missing from `PATH` produces a nonfatal `not
+installed` warning and does not change the exit code.
 
 ## Architecture
 
@@ -349,8 +366,8 @@ src/
   indexer/               TypeScript/JavaScript AST symbol and dependency extraction
   mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
   contracts/             in-process TypeScript contract verification
-  setup/                 agent catalog/path resolution, JSON/TOML target merge, portable MCP
-                         install/diagnose (rules writer pending)
+  setup/                 agent catalog/path resolution, JSON/TOML target merge, marked rules
+                         install/diagnose, and portable MCP install/diagnose
   util/                  terminal-text sanitizer and path-safety helpers
 test/                    Vitest integration suites for db, service, session brief, graph, indexer, MCP, CLI, contracts, setup
 ```

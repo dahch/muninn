@@ -101,7 +101,7 @@ Usage:
   muninn check [files...] [--project <path>]
   muninn mcp run [--db <path>] [--project <path>]
   muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>]
-               [--portable|--no-portable] [--force] [--dry-run] [--status]
+               [--portable|--no-portable] [--no-rules] [--force] [--dry-run] [--status]
 
 Commands:
   memory  query and manage the persistent codebase memory (init, search, sync, index, brief)

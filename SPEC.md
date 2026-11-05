@@ -2,12 +2,12 @@
 
 Muninn is a standalone, local-first memory engine for coding agents and developers. It stores project observations in SQLite, supports lexical search and code-symbol indexing, and exposes memory operations through a library, CLI, and MCP server. It also provides read-only session bootstrap and bounded dependency-neighbor recovery. This specification adds autonomous setup for configuring Muninn in supported agents, including a portable MCP configuration and optional agent rules, without requiring Huginn.
 
-> **Implementation status:** iteration 3 implements the portable destination plus the 13-entry agent
+> **Implementation status:** iteration 4 implements the portable destination, the 13-entry agent
 > catalog, `--list`/`--agent` selection, marker and `MUNINN_AGENT_<ID>_MCP_PATH` resolution, the JSON
-> `mcpServers` / OpenCode `mcp` writers with project-path containment, and dependency-free Codex TOML
-> merging, safe writes, and diagnostics. Rules installation (REQ-21–REQ-22) remains planned work in
-> [`plan.md`](./plan.md). Treat the unimplemented rules requirements as the target contract, not current
-> behavior.
+> `mcpServers` / OpenCode `mcp` writers with project-path containment, dependency-free Codex TOML
+> merging, and marked rules installation with legacy-block handling. Setup also reports MCP and rules
+> outcomes separately, supports read-only status and dry-run, and warns when a selected agent binary is
+> not installed. See [`plan.md`](./plan.md) for the completed iteration record.
 
 ## Goals
 
@@ -191,8 +191,8 @@ Muninn is a standalone, local-first memory engine for coding agents and develope
 - An unknown agent ID is reported with the valid IDs and returns exit code 1.
 - With no `--agent`, setup processes only the portable configuration and does not modify any rules file.
 - `--portable` is accepted and is equivalent to omitting `--agent`.
-- *Current implementation:* the catalog, selection, `--list`, JSON destinations, and Codex TOML
-  destination are implemented; rules-file installation remains deferred to iteration 4.
+- The catalog, selection, `--list`, JSON destinations, Codex TOML destination, and marked rules
+  installation are implemented.
 - With `--agent`, setup processes the selected destinations and the portable configuration unless `--no-portable` is supplied.
 - `--no-portable` without `--agent` is invalid, reports that there is nothing to do, shows usage, and returns exit code 1.
 - `--list` prints IDs, labels, formats, resolved or templated paths, and rules files without modifying files or creating directories.

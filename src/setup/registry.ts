@@ -32,7 +32,7 @@ export interface AgentTarget {
   format: AgentFormat;
   /** Path templates; `{project}`, `{home}` and `{opencodeConfigDir}` expand. */
   mcpPaths: string[];
-  /** Rules-file path relative to the project root. Metadata only in iteration 2. */
+  /** Rules-file path relative to the project root. */
   rulesFile: string;
 }
 
@@ -143,6 +143,15 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
 
 export const AGENT_IDS = Object.keys(AGENT_REGISTRY) as AgentId[];
 
+/**
+ * Deterministic executable name used only for the nonfatal `not installed`
+ * diagnostic. It is intentionally not inferred from whether a config file
+ * exists.
+ */
+export function agentExecutable(id: AgentId): string {
+  return id;
+}
+
 export function isAgentId(value: string): value is AgentId {
   return Object.prototype.hasOwnProperty.call(AGENT_REGISTRY, value);
 }
@@ -219,7 +228,7 @@ export function resolveMcpPaths(
   return templates.map((template) => expandTemplate(template, options));
 }
 
-/** Rules path as catalog metadata, not touched during iteration 2. */
+/** Rules path under the selected project root (or the catalog path without one). */
 export function resolveRulesPath(
   target: AgentId | AgentTarget,
   options: Pick<ResolveMcpPathsOptions, "projectPath"> = {},

@@ -75,15 +75,15 @@ modules: src/setup/, src/commands/, src/cli.ts, test/, README.md, DESIGN.md, ADR
 **Goal:** Setup configures selected agents with idempotent usage rules, complete per-destination reporting, and documented standalone installation behavior.
 
 **Acceptance criteria:**
-- [ ] Selecting one or more agents installs a marked rules block by default; no agent selection leaves rules files untouched, and `--no-rules` suppresses rules installation. [REQ-21]
-- [ ] Rules insertion and replacement are idempotent, preserve surrounding content and order, append to existing files, and create a missing file only when a write is required. Shared rules files receive only one Muninn block. [REQ-21]
-- [ ] A `huginn:muninn-rules` block is reported as `stale`, left unchanged without `--force`, and replaced while preserving surrounding content with `--force`. [REQ-22]
-- [ ] Rules paths use the existing path-safety checks. Reports identify the rules file and distinguish rules outcomes (`written`, `present`, `stale`, `skipped`, `failed`) from MCP outcomes. [REQ-22, REQ-24]
-- [ ] `--dry-run` reports MCP and rules actions without writes; fatal errors stop at the first failure in normal setup and dry-run, while earlier writes remain. Status aggregates all applicable diagnostics and failures. [REQ-23, REQ-24]
-- [ ] Missing agent binaries produce a `not installed` warning without preventing configuration or changing the exit code. [REQ-24, REQ-25]
-- [ ] Exit codes are limited to 0 for completed, present, or nonfatal skipped results and 1 for fatal file/path errors, unknown agents, or invalid usage. [REQ-25]
-- [ ] `README.md`, `DESIGN.md`, `ADR.md`, and `CHANGELOG.md` document setup. The ADR explains why machine-oriented MCP configuration is merged structurally while human-authored rules use marked, appended blocks and legacy-block detection. [REQ-21, REQ-22]
-- [ ] Tests verify rules insertion, preservation, idempotency, shared-file deduplication, stale handling, read-only modes, error behavior, exit codes, and `not installed` warnings. [REQ-21–REQ-25]
+- [x] Selecting one or more agents installs a marked rules block by default; no agent selection leaves rules files untouched, and `--no-rules` suppresses rules installation. [REQ-21]
+- [x] Rules insertion and replacement are idempotent, preserve surrounding content and order, append to existing files, and create a missing file only when a write is required. Shared rules files receive only one Muninn block. [REQ-21]
+- [x] A `huginn:muninn-rules` block is reported as `stale`, left unchanged without `--force`, and replaced while preserving surrounding content with `--force`. [REQ-22]
+- [x] Rules paths use the existing path-safety checks. Reports identify the rules file and distinguish rules outcomes (`written`, `present`, `stale`, `skipped`, `failed`) from MCP outcomes. [REQ-22, REQ-24]
+- [x] `--dry-run` reports MCP and rules actions without writes; fatal errors stop at the first failure in normal setup and dry-run, while earlier writes remain. Status aggregates all applicable diagnostics and failures. [REQ-23, REQ-24]
+- [x] Missing agent binaries produce a `not installed` warning without preventing configuration or changing the exit code. [REQ-24, REQ-25]
+- [x] Exit codes are limited to 0 for completed, present, or nonfatal skipped results and 1 for fatal file/path errors, unknown agents, or invalid usage. [REQ-25]
+- [x] `README.md`, `DESIGN.md`, `ADR.md`, and `CHANGELOG.md` document setup. The ADR explains why machine-oriented MCP configuration is merged structurally while human-authored rules use marked, appended blocks and legacy-block detection. [REQ-21, REQ-22]
+- [x] Tests verify rules insertion, preservation, idempotency, shared-file deduplication, stale handling, read-only modes, error behavior, exit codes, and `not installed` warnings. [REQ-21–REQ-25]
 
 **Verification:**
 ```sh
