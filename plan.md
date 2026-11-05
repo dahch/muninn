@@ -53,12 +53,12 @@ modules: src/setup/, src/commands/, src/cli.ts, test/
 **Goal:** Codex TOML configuration can be safely installed and diagnosed alongside JSON targets and the portable configuration.
 
 **Acceptance criteria:**
-- [ ] Selecting Codex structurally merges `[mcp_servers.muninn]` with `command = "muninn"` and the appropriate `args`, preserving other TOML tables and keys. [REQ-19, REQ-20]
-- [ ] Malformed TOML reports the file and cause without modifying the original; a correct existing entry is byte-for-byte idempotent. [REQ-20]
-- [ ] The TOML writer follows the same path safety, permission, temporary-file, and atomic-rename rules as JSON configuration writes. [REQ-20]
-- [ ] `--status` and `--dry-run` handle TOML without writing, and `--status` reports malformed TOML while continuing to inspect all applicable destinations. [REQ-23, REQ-24]
-- [ ] With a selected agent, MCP status is reported per destination and the portable remains included unless suppressed. [REQ-18, REQ-23]
-- [ ] Tests cover structural TOML merge, preservation of unrelated tables, malformed TOML, permissions, symlinks, idempotency, and aggregate status behavior. [REQ-20, REQ-23, REQ-24]
+- [x] Selecting Codex structurally merges `[mcp_servers.muninn]` with `command = "muninn"` and the appropriate `args`, preserving other TOML tables and keys. [REQ-19, REQ-20]
+- [x] Malformed TOML reports the file and cause without modifying the original; a correct existing entry is byte-for-byte idempotent. [REQ-20]
+- [x] The TOML writer follows the same path safety, permission, temporary-file, and atomic-rename rules as JSON configuration writes. [REQ-20]
+- [x] `--status` and `--dry-run` handle TOML without writing, and `--status` reports malformed TOML while continuing to inspect all applicable destinations. [REQ-23, REQ-24]
+- [x] With a selected agent, MCP status is reported per destination and the portable remains included unless suppressed. [REQ-18, REQ-23]
+- [x] Tests cover structural TOML merge, preservation of unrelated tables, malformed TOML, permissions, symlinks, idempotency, and aggregate status behavior. [REQ-20, REQ-23, REQ-24]
 
 **Verification:**
 ```sh

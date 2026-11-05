@@ -21,6 +21,10 @@ import {
   getJsonTargetStatus,
   setupJsonTarget,
 } from "../src/setup/json-target.js";
+import {
+  getTomlTargetStatus,
+  setupTomlTarget,
+} from "../src/setup/toml-target.js";
 import { handleSetupCommand, printSetupUsage } from "../src/commands/setup.js";
 import { VERSION, main, parseArgs, usage } from "../src/cli.js";
 
@@ -977,7 +981,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
     expect(fs.existsSync(path.join(project, ".pi"))).toBe(false);
   });
 
-  it("reports Codex as deferred instead of silently installing TOML", async () => {
+  it("installs Codex TOML instead of deferring it", async () => {
     await handleSetupCommand({
       "--home": home,
       "--project": project,
@@ -985,10 +989,19 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
       "--no-portable": true,
     });
     expect(process.exitCode).toBe(0);
-    expect(loggedText()).toContain("OpenAI Codex CLI (codex)");
-    expect(loggedText()).toContain("Outcome: skipped");
-    expect(loggedText()).toContain("iteration 3");
-    expect(fs.existsSync(path.join(home, ".codex", "config.toml"))).toBe(false);
+    const text = loggedText();
+    expect(text).toContain("OpenAI Codex CLI (codex)");
+    expect(text).toContain("Format:  toml");
+    expect(text).toContain("Outcome: written");
+    expect(text).toContain("Changed: true");
+
+    const configPath = path.join(home, ".codex", "config.toml");
+    expect(fs.existsSync(configPath)).toBe(true);
+    const content = fs.readFileSync(configPath, "utf8");
+    expect(content).toContain("[mcp_servers.muninn]");
+    expect(content).toContain('command = "muninn"');
+    expect(content).toContain('args = ["mcp", "run"]');
+    expect(content).not.toContain("--project");
   });
 
   it("returns per-destination reports identifying each file", async () => {
@@ -1333,7 +1346,8 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
     expect(fs.readFileSync(desktopConfig, "utf8")).toBe("{ broken");
   });
 
-  it("reports Codex status as deferred without inspecting or writing TOML", async () => {
+  it("inspects Codex TOML status without writing or creating directories", async () => {
+    const configPath = path.join(home, ".codex", "config.toml");
     await handleSetupCommand({
       "--home": home,
       "--project": project,
@@ -1342,11 +1356,30 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
       "--no-portable": true,
     });
     expect(process.exitCode).toBe(0);
-    const text = loggedText();
+    let text = loggedText();
     expect(text).toContain("OpenAI Codex CLI (codex)");
-    expect(text).toContain(path.join(home, ".codex", "config.toml"));
-    expect(text).toContain("iteration 3");
+    expect(text).toContain(configPath);
+    expect(text).toContain("State:   absent");
     expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
+
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, "[mcp_servers.muninn\n");
+    logSpy.mockClear();
+    errorSpy.mockClear();
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--status": true,
+      "--agent": "codex",
+      "--no-portable": true,
+    });
+    expect(process.exitCode).toBe(1);
+    text = loggedText();
+    expect(text).toContain("State:   malformed");
+    expect(text).toContain(configPath);
+    expect(text.toLowerCase()).toContain("malformed toml");
+    expect(fs.readFileSync(configPath, "utf8")).toBe("[mcp_servers.muninn\n");
   });
 
   it("stops normal setup at the first fatal JSON error but retains earlier writes", async () => {
@@ -1453,5 +1486,357 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
       command: ["muninn", "mcp", "run", "--project", project],
       enabled: true,
     });
+  });
+});
+
+describe("Codex TOML setup (Iteration 3)", () => {
+  let home: string;
+  let project: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-setup3-home-"));
+    project = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-setup3-project-"));
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = 0;
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    process.exitCode = 0;
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  });
+
+  function loggedText(): string {
+    return [
+      ...logSpy.mock.calls.map((call: unknown[]) => call.join(" ")),
+      ...errorSpy.mock.calls.map((call: unknown[]) => call.join(" ")),
+    ].join("\n");
+  }
+
+  function codexPath(): string {
+    return path.join(home, ".codex", "config.toml");
+  }
+
+  it("creates Codex TOML with the canonical entry and safe permissions", () => {
+    const report = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+      projectPath: project,
+    });
+
+    expect(report.outcome).toBe("written");
+    expect(report.changed).toBe(true);
+    expect(fs.statSync(path.dirname(codexPath())).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(codexPath()).mode & 0o777).toBe(0o600);
+    const content = fs.readFileSync(codexPath(), "utf8");
+    expect(content).toContain("[mcp_servers.muninn]");
+    expect(content).toContain('command = "muninn"');
+    expect(content).toContain('args = ["mcp", "run"]');
+  });
+
+  it("merges structurally, preserving unrelated tables, keys, and comments", () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    const original =
+      '# user configuration\n' +
+      'model = "gpt-5"\n\n' +
+      '[mcp_servers.otro]\n' +
+      'command = "other"\n' +
+      'args = ["serve"]\n';
+    fs.writeFileSync(codexPath(), original);
+
+    const report = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+      projectPath: project,
+    });
+    expect(report.outcome).toBe("written");
+
+    const content = fs.readFileSync(codexPath(), "utf8");
+    expect(content).toContain("# user configuration");
+    expect(content).toContain('model = "gpt-5"');
+    expect(content).toContain("[mcp_servers.otro]");
+    expect(content).toContain('command = "other"');
+    expect(content).toContain('args = ["serve"]');
+    expect(content).toContain("[mcp_servers.muninn]");
+    expect(content).toContain('command = "muninn"');
+    expect(content).toContain('args = ["mcp", "run"]');
+  });
+
+  it("pins --project only when the TOML file is inside the selected project", () => {
+    const inProject = path.join(project, ".codex", "config.toml");
+    const inside = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: inProject,
+      projectPath: project,
+    });
+    expect(inside.outcome).toBe("written");
+    const insideContent = fs.readFileSync(inProject, "utf8");
+    expect(insideContent).toContain(
+      `args = ["mcp", "run", "--project", ${JSON.stringify(project)}]`,
+    );
+
+    const outside = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+      projectPath: project,
+    });
+    expect(outside.outcome).toBe("written");
+    expect(fs.readFileSync(codexPath(), "utf8")).not.toContain("--project");
+  });
+
+  it("is byte-for-byte idempotent for a correct entry", () => {
+    setupTomlTarget({ target: AGENT_REGISTRY.codex, path: codexPath() });
+    const before = fs.readFileSync(codexPath());
+    const beforeStat = fs.statSync(codexPath());
+
+    const second = setupTomlTarget({ target: AGENT_REGISTRY.codex, path: codexPath() });
+    expect(second.outcome).toBe("present");
+    expect(second.changed).toBe(false);
+    expect(fs.readFileSync(codexPath())).toEqual(before);
+    expect(fs.statSync(codexPath()).mtimeMs).toBe(beforeStat.mtimeMs);
+  });
+
+  it("treats an entry with extra keys as a conflict rather than canonical", () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    const original =
+      '[mcp_servers.muninn]\ncommand = "muninn"\nargs = ["mcp", "run"]\nenv = { MODE = "x" }\n';
+    fs.writeFileSync(codexPath(), original);
+
+    const status = getTomlTargetStatus({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(status.state).toBe("conflict");
+
+    const skipped = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(skipped.outcome).toBe("skipped");
+    expect(fs.readFileSync(codexPath(), "utf8")).toBe(original);
+
+    const replaced = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+      force: true,
+    });
+    expect(replaced.outcome).toBe("written");
+    const content = fs.readFileSync(codexPath(), "utf8");
+    expect(content).toContain('command = "muninn"');
+    expect(content).not.toContain("env =");
+  });
+
+  it("reports malformed TOML with path and cause without modifying the original", () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    const original = "[mcp_servers.muninn\ncommand = \"muninn\"\n";
+    fs.writeFileSync(codexPath(), original);
+
+    const status = getTomlTargetStatus({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(status.state).toBe("malformed");
+    expect(status.error).toContain(codexPath());
+    expect(status.error?.toLowerCase()).toContain("malformed toml");
+
+    const report = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(report.outcome).toBe("failed");
+    expect(report.changed).toBe(false);
+    expect(fs.readFileSync(codexPath(), "utf8")).toBe(original);
+  });
+
+  it("skips a conflicting entry without --force and replaces it with --force", () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    const original =
+      '[mcp_servers.muninn]\ncommand = "huginn"\nargs = ["mcp", "run"]\n';
+    fs.writeFileSync(codexPath(), original);
+
+    const status = getTomlTargetStatus({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(status.state).toBe("legacy");
+
+    const skipped = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(skipped.outcome).toBe("skipped");
+    expect(skipped.changed).toBe(false);
+    expect(fs.readFileSync(codexPath(), "utf8")).toBe(original);
+
+    const replaced = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+      force: true,
+    });
+    expect(replaced.outcome).toBe("written");
+    expect(replaced.changed).toBe(true);
+    const content = fs.readFileSync(codexPath(), "utf8");
+    expect(content).toContain('command = "muninn"');
+    expect(content).not.toContain("huginn");
+  });
+
+  it("preserves existing file permissions on a changed write", () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    fs.writeFileSync(codexPath(), '[mcp_servers.muninn]\ncommand = "old"\n', {
+      mode: 0o640,
+    });
+    fs.chmodSync(codexPath(), 0o640);
+
+    const report = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+      force: true,
+    });
+    expect(report.outcome).toBe("written");
+    expect(fs.statSync(codexPath()).mode & 0o777).toBe(0o640);
+  });
+
+  it("refuses a final-component symlink instead of following it", () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    const targetPath = path.join(home, "outside.toml");
+    fs.writeFileSync(targetPath, "keep\n");
+    fs.symlinkSync(targetPath, codexPath());
+
+    const status = getTomlTargetStatus({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(status.state).toBe("malformed");
+    expect(status.error?.toLowerCase()).toContain("symlink");
+
+    const report = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(report.outcome).toBe("failed");
+    expect(fs.readFileSync(targetPath, "utf8")).toBe("keep\n");
+  });
+
+  it("keeps status and dry-run read-only for TOML destinations", () => {
+    const status = getTomlTargetStatus({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+    });
+    expect(status.state).toBe("absent");
+    expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
+
+    const dryRun = setupTomlTarget({
+      target: AGENT_REGISTRY.codex,
+      path: codexPath(),
+      dryRun: true,
+    });
+    expect(dryRun.outcome).toBe("written");
+    expect(dryRun.changed).toBe(true);
+    expect(dryRun.dryRun).toBe(true);
+    expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
+  });
+
+  it("aggregates malformed Codex TOML with other destinations and portable status", async () => {
+    const cursorPath = path.join(project, ".cursor", "mcp.json");
+    setupJsonTarget({
+      target: AGENT_REGISTRY.cursor,
+      path: cursorPath,
+      projectPath: project,
+    });
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    fs.writeFileSync(codexPath(), "[mcp_servers.muninn\n");
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--status": true,
+      "--agent": "codex,cursor",
+    });
+
+    expect(process.exitCode).toBe(1);
+    const text = loggedText();
+    expect(text).toContain("OpenAI Codex CLI (codex)");
+    expect(text).toContain("State:   malformed");
+    expect(text).toContain("Cursor (cursor)");
+    expect(text).toContain("State:   registered");
+    expect(text).toContain("Portable MCP configuration");
+    expect(text).toContain("State:   absent");
+    expect(fs.readFileSync(codexPath(), "utf8")).toBe("[mcp_servers.muninn\n");
+  });
+
+  it("writes through the CLI and preserves unrelated TOML", async () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    fs.writeFileSync(codexPath(), '[mcp_servers.other]\ncommand = "other"\n');
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "codex",
+      "--no-portable": true,
+    });
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("Outcome: written");
+    const content = fs.readFileSync(codexPath(), "utf8");
+    expect(content).toContain("[mcp_servers.other]");
+    expect(content).toContain('command = "other"');
+    expect(content).toContain("[mcp_servers.muninn]");
+    expect(content).toContain('args = ["mcp", "run"]');
+  });
+
+  it("reports a malformed TOML install as failed and exits 1 without writing", async () => {
+    fs.mkdirSync(path.dirname(codexPath()), { recursive: true });
+    fs.writeFileSync(codexPath(), 'model = "a"\nmodel = "b"\n');
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "codex",
+      "--no-portable": true,
+    });
+
+    expect(process.exitCode).toBe(1);
+    const text = loggedText();
+    expect(text).toContain("OpenAI Codex CLI (codex)");
+    expect(text).toContain("Outcome: failed");
+    expect(text.toLowerCase()).toContain("malformed toml");
+    expect(fs.readFileSync(codexPath(), "utf8")).toBe('model = "a"\nmodel = "b"\n');
+  });
+
+  it("fails status and install when an agent path override resolves to no paths", async () => {
+    const previous = process.env.MUNINN_AGENT_CODEX_MCP_PATH;
+    process.env.MUNINN_AGENT_CODEX_MCP_PATH = ":";
+    try {
+      await handleSetupCommand({
+        "--home": home,
+        "--project": project,
+        "--status": true,
+        "--agent": "codex",
+        "--no-portable": true,
+      });
+      expect(process.exitCode).toBe(1);
+      expect(loggedText()).toContain("contains no usable paths");
+
+      process.exitCode = 0;
+      logSpy.mockClear();
+      errorSpy.mockClear();
+
+      await handleSetupCommand({
+        "--home": home,
+        "--project": project,
+        "--agent": "codex",
+        "--no-portable": true,
+      });
+      expect(process.exitCode).toBe(1);
+      expect(loggedText()).toContain("contains no usable paths");
+      expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.MUNINN_AGENT_CODEX_MCP_PATH;
+      else process.env.MUNINN_AGENT_CODEX_MCP_PATH = previous;
+    }
   });
 });

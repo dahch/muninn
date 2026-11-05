@@ -37,8 +37,9 @@ Vitest default; the repository config sets a 20-second timeout.
 - `src/mcp/` — MCP server, tool registry, Zod schemas, argument normalization, bounded stdio.
 - `src/commands/` — CLI handlers for memory, MCP, contract verification, and setup.
 - `src/setup/` — agent catalog and path resolution (`registry.ts`), JSON `mcpServers` / OpenCode `mcp`
-  target merging (`json-target.ts`), and the portable MCP configuration installer/diagnostic
-  (`portable.ts`). Codex TOML and rules writers described in `SPEC.md` are not implemented yet.
+  target merging (`json-target.ts`), dependency-free Codex TOML merge/diagnostics (`toml-target.ts`),
+  and the portable MCP configuration installer/diagnostic (`portable.ts`). The rules writer described
+  in `SPEC.md` is not implemented yet.
 - `src/contracts/` — in-process TypeScript contract verification.
 - `src/util/` — terminal sanitization and path safety.
 
@@ -64,9 +65,9 @@ for the staged setup scope.
 - Setup configuration, target, and legacy paths go through `checkDocPath`; the legacy file is
   read-only, a final symlink is refused, writes are atomic with exclusive temporary files, and
   `--status`/`--dry-run` must not create or modify anything.
-- Setup preserves unrelated JSON data and `mcpServers` / `mcp` siblings, and leaves a conflicting or
-  legacy `muninn` entry untouched unless `--force` is supplied. A correct entry is byte-for-byte
-  idempotent.
+- Setup preserves unrelated JSON data and `mcpServers` / `mcp` siblings as well as unrelated TOML
+  tables and keys, and leaves a conflicting or legacy `muninn` entry untouched unless `--force` is
+  supplied. A correct entry is byte-for-byte idempotent.
 - Relative imports use `.js` extensions and TypeScript strict mode is enforced.
 - Add new ADRs to [`ADR.md`](./ADR.md) instead of editing past decisions. Mark unimplemented proposals
   as `Proposed` and keep documentation free of claims that they already exist.

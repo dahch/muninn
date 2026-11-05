@@ -8,7 +8,7 @@ import {
   printMemoryUsage,
   printMcpUsage,
 } from "../src/commands/memory.js";
-import { main, parseArgs, usage } from "../src/cli.js";
+import { main, parseArgs, usage, VERSION } from "../src/cli.js";
 import { MemoryService } from "../src/service/memory-service.js";
 import { getDatabase } from "../src/db/client.js";
 import * as mcpServerModule from "../src/mcp/server.js";
@@ -1091,5 +1091,135 @@ describe("Muninn CLI Commands & Integration", () => {
       expect(errorOutput).toContain("Unknown subcommand: unknown");
       expect(process.exitCode).toBe(1);
     });
+  });
+});
+
+describe("CLI parser and routing edge cases", () => {
+  let tempDir: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-cli-extra-"));
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = 0;
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    process.exitCode = 0;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function loggedText(): string {
+    return [
+      ...logSpy.mock.calls.map((call: unknown[]) => call.join(" ")),
+      ...errorSpy.mock.calls.map((call: unknown[]) => call.join(" ")),
+    ].join("\n");
+  }
+
+  it("mirrors multiple positionals and keeps the last one in _positional", () => {
+    const parsed = parseArgs(["memory", "search", "vector", "search", "--limit", "5"]);
+
+    expect(parsed._command).toBe("memory");
+    expect(parsed._positionals).toEqual(["search", "vector", "search"]);
+    expect(parsed._positional).toBe("search");
+    expect(parsed["--limit"]).toBe("5");
+  });
+
+  it("supports --flag=value and negative numeric values without swallowing the next flag", () => {
+    const parsed = parseArgs(["memory", "--db=:memory:", "--limit", "-3", "--quiet", "tail"]);
+
+    expect(parsed["--db"]).toBe(":memory:");
+    expect(parsed["--limit"]).toBe("-3");
+    expect(parsed["--quiet"]).toBe(true);
+    expect(parsed._positionals).toEqual(["tail"]);
+  });
+
+  it("treats a lone dash as a positional", () => {
+    const parsed = parseArgs(["memory", "search", "-"]);
+    expect(parsed._positionals).toEqual(["search", "-"]);
+    expect(parsed._positional).toBe("-");
+  });
+
+  it("prints usage when invoked without a command", async () => {
+    await main([]);
+    expect(loggedText()).toContain("muninn — persistent semantic and symbol memory");
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("routes the help aliases to usage", async () => {
+    for (const argv of [["help"], ["--help"], ["-h"]]) {
+      logSpy.mockClear();
+      await main(argv);
+      expect(loggedText()).toContain("Usage:");
+      expect(process.exitCode).toBe(0);
+    }
+  });
+
+  it("routes version aliases to the package version", async () => {
+    for (const argv of [["--version"], ["-v"], ["version"]]) {
+      logSpy.mockClear();
+      await main(argv);
+      expect(loggedText()).toContain(`muninn ${VERSION}`);
+      expect(process.exitCode).toBe(0);
+    }
+  });
+
+  it("routes 'check' with explicit files and with no files", async () => {
+    fs.writeFileSync(path.join(tempDir, "clean.ts"), "export const ok: number = 1;\n");
+
+    await main(["check", "clean.ts", "--project", tempDir]);
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("TypeScript contracts verified");
+
+    logSpy.mockClear();
+    await main(["check", "--project", tempDir]);
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("TypeScript contracts verified");
+  });
+
+  it("routes 'setup' through main and keeps the catalog read-only", async () => {
+    const home = path.join(tempDir, "home");
+    const project = path.join(tempDir, "project");
+
+    await main(["setup", "--list", "--home", home, "--project", project]);
+
+    expect(process.exitCode).toBe(0);
+    const text = loggedText();
+    expect(text).toContain("Muninn agent setup catalog");
+    expect(text).toContain("codex — OpenAI Codex CLI");
+    expect(fs.existsSync(home)).toBe(false);
+    expect(fs.existsSync(project)).toBe(false);
+  });
+
+  it("prints per-agent catalog errors when an override is unusable", async () => {
+    const previous = process.env.MUNINN_AGENT_CODEX_MCP_PATH;
+    process.env.MUNINN_AGENT_CODEX_MCP_PATH = ":";
+    try {
+      await main([
+        "setup",
+        "--list",
+        "--home",
+        path.join(tempDir, "home"),
+        "--project",
+        path.join(tempDir, "project"),
+      ]);
+
+      expect(process.exitCode).toBe(0);
+      const text = loggedText();
+      expect(text).toContain("codex — OpenAI Codex CLI");
+      expect(text).toContain("<error: MUNINN_AGENT_CODEX_MCP_PATH contains no usable paths>");
+    } finally {
+      if (previous === undefined) delete process.env.MUNINN_AGENT_CODEX_MCP_PATH;
+      else process.env.MUNINN_AGENT_CODEX_MCP_PATH = previous;
+    }
+  });
+
+  it("documents setup in usage output", () => {
+    expect(usage()).toContain("muninn setup");
+    expect(usage()).toContain("--agent <id|all|id,id>");
   });
 });

@@ -3,9 +3,9 @@
 Decisions are listed in recording order. `ADR-1`–`ADR-3` are implemented in the current codebase.
 `ADR-4`–`ADR-10` were recorded retroactively from the 0.1.0 codebase so the existing architecture has
 an explicit history. `ADR-11` records a correction to the dependency relation set described in
-`ADR-6`. `ADR-12`–`ADR-14` describe the full setup contract; `ADR-15` and `ADR-16` record the two
-implemented slices (the portable destination first, then the agent catalog with JSON destinations).
-Codex TOML and rules installation remain proposed work.
+`ADR-6`. `ADR-12`–`ADR-14` describe the full setup contract; `ADR-15`–`ADR-17` record the implemented slices
+(the portable destination first, then the agent catalog with JSON destinations, then Codex TOML).
+Rules installation remains proposed work.
 
 ## ADR-1: Track decision supersession in observation rows
 
@@ -256,4 +256,33 @@ Codex TOML and rules installation remain proposed work.
   rules files are still untouched, and the TOML/rules requirements in ADR-13 and ADR-14 remain
   proposed. The JSON writer reuses the portable writer's path screening, atomic temporary-file
   replacement, permission handling, conflict rules, and idempotent no-op behavior instead of creating
-  a second setup path.
+  a second setup path. The Codex TOML portion of this decision is superseded by ADR-17, which implements
+  the TOML destination; the rules portion remains proposed.
+
+## ADR-17: Parse and merge Codex TOML without a runtime dependency
+
+- **Date**: 2026-11-05
+- **Status**: Accepted and implemented for Codex TOML
+- **Context**: Iteration 3 must configure Codex at `{home}/.codex/config.toml` under
+  `[mcp_servers.muninn]`. Adding a TOML package would introduce a new runtime dependency solely for one
+  destination, while the JSON writers already establish per-file path screening, atomic replacement,
+  conflict handling, and byte-for-byte no-op behavior. A TOML file can also contain unrelated keys and
+  tables, so rewriting the whole document from a parsed object would discard formatting and comments.
+- **Decision**: Implement a dependency-free TOML parser and structural merge in
+  `src/setup/toml-target.ts`. Validate the complete document before any merge; report malformed input
+  with the path and cause and leave the original untouched. Preserve unrelated tables, keys, comments,
+  and formatting where feasible. Treat duplicate table definitions as malformed, including a repeated
+  non-array header and an explicit header for a table already created by dotted keys. Insert or replace
+  only the `[mcp_servers.muninn]` table, using `command = "muninn"` and the canonical argument list;
+  a forced replacement may discard comments and formatting inside the replaced Muninn region. Reuse
+  `checkDocPath` and `safeWriteAtomic` so TOML has the same protected-path checks, exclusive temporary
+  file, atomic rename, permission
+  preservation, `0o600`/`0o700` defaults, and final-component symlink refusal as JSON. A correct existing
+  entry is a byte-for-byte no-op, and changed writes only occur for absent, legacy, or `--force`
+  replacement cases.
+- **Consequences**: Codex configuration works without a new dependency and without changing the
+  established per-file safety model. The parser is intentionally limited to validated TOML syntax and
+  structural edits rather than a full TOML serializer, which keeps unrelated content outside the
+  replaced region intact but means unsupported document shapes must fail without writing instead of
+  being normalized. Rules-file
+  installation remains outside this decision and iteration.

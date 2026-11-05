@@ -37,10 +37,11 @@ package with no dependency on the orchestrator.
   (`muninn check`) and as the `muninn_verify_contract` MCP tool.
 - **JSONL sync** — export/import the whole memory as portable line-delimited JSON.
 - **Agent setup** — `muninn setup` lists the supported agent catalog and installs a `muninn` MCP
-  entry into standard `mcpServers` and OpenCode `mcp` configurations, plus the project-agnostic
-  portable file at `{home}/.muninn/mcp.json`. It supports `--agent`, `--project`, `--list`,
-  `--status`, `--dry-run`, `--force`, and `--home`, preserves unrelated configuration, and never
-  modifies the legacy Huginn file. Codex TOML and rules blocks are planned for later iterations.
+  entry into standard `mcpServers`, OpenCode `mcp`, and Codex TOML configurations, plus the
+  project-agnostic portable file at `{home}/.muninn/mcp.json`. It supports `--agent`, `--project`,
+  `--list`, `--status`, `--dry-run`, `--force`, and `--home`, preserves unrelated configuration, and never
+  modifies the legacy Huginn file. Codex TOML is merged safely; rules blocks are planned for a later
+  iteration.
 - **Local-first and self-contained** — no embeddings, no network, no server: one SQLite file
   and one process.
 
@@ -119,10 +120,10 @@ muninn mcp run --project .
 ```
 
 `muninn setup --list` shows every supported destination and where its configuration lives. With
-`--agent`, setup merges the `muninn` entry into the selected JSON destinations (and the portable file
-unless `--no-portable` is given); `--project` supplies the absolute project path used by
-project-contained configuration files. Codex TOML merging and rules blocks are described in `SPEC.md`
-and `plan.md` and remain planned work.
+`--agent`, setup merges the `muninn` entry into the selected destinations (JSON or Codex TOML) and the
+portable file unless `--no-portable` is given; `--project` supplies the absolute project path used by
+project-contained configuration files. Codex TOML merging is supported with safe atomic writes and
+read-only diagnostics. Rules blocks remain planned work described in `SPEC.md` and `plan.md`.
 
 The `muninn_save` tool accepts `supersedesTopicKey` / `supersedes_topic_key`, and
 `muninn_search` / `muninn_context` accept `includeSuperseded` / `include_superseded`. Existing
@@ -136,8 +137,8 @@ wrapper, and does not create or initialize a database when called on a default s
 
 ## Agent Setup
 
-`muninn setup` manages the portable destination `{home}/.muninn/mcp.json` and the JSON-format agent
-destinations in the catalog.
+`muninn setup` manages the portable destination `{home}/.muninn/mcp.json` and the JSON- and
+TOML-format agent destinations in the catalog.
 
 ```sh
 muninn setup --list                              # print the catalog without writing
@@ -171,9 +172,13 @@ permissions are preserved. Re-running setup over a correct entry is byte-for-byt
 reports `changed: false`. `--list`, `--status`, and `--dry-run` never create or modify files,
 directories, or temporary files.
 
-Codex is listed with its TOML destination, but TOML installation is deferred to iteration 3 and is
-reported as skipped rather than written. Rules-file paths are recorded in the catalog but rules are
-not read or written yet; `--no-rules` is accepted for forward compatibility.
+Codex uses a dependency-free TOML writer that merges `[mcp_servers.muninn]`, preserves unrelated
+tables and keys, and applies the same conflict, permission, atomic-write, and symlink rules as JSON
+destinations. A forced replacement can discard comments and formatting inside the replaced Muninn
+region; unrelated content outside it is preserved where feasible. Malformed TOML, including duplicate
+table definitions, is reported with its path and cause, leaves the original untouched, and status
+continues to inspect the remaining destinations before exiting 1. Rules-file paths are recorded in the
+catalog but rules are not read or written yet; `--no-rules` is accepted for forward compatibility.
 
 ## Architecture
 
@@ -192,7 +197,7 @@ flowchart LR
     Indexer["AST indexer\nTypeScript Compiler API"] --> Service
     CLI --> Verifier["Contract verifier\nTypeScript Compiler API"]
     MCP --> Verifier
-    CLI --> Setup["Agent setup\nJSON catalog + portable"]
+    CLI --> Setup["Agent setup\nJSON/TOML catalog + portable"]
 ```
 
 See [`DESIGN.md`](./DESIGN.md) for the schema, service transactions, MCP validation pipeline, CLI
@@ -344,8 +349,8 @@ src/
   indexer/               TypeScript/JavaScript AST symbol and dependency extraction
   mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
   contracts/             in-process TypeScript contract verification
-  setup/                 agent catalog/path resolution, JSON target merge, portable MCP install/diagnose
-                         (Codex TOML and rules writers pending)
+  setup/                 agent catalog/path resolution, JSON/TOML target merge, portable MCP
+                         install/diagnose (rules writer pending)
   util/                  terminal-text sanitizer and path-safety helpers
 test/                    Vitest integration suites for db, service, session brief, graph, indexer, MCP, CLI, contracts, setup
 ```

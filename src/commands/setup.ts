@@ -13,6 +13,12 @@ import {
   type JsonTargetStatus,
 } from "../setup/json-target.js";
 import {
+  getTomlTargetStatus,
+  setupTomlTarget,
+  type TomlTargetReport,
+  type TomlTargetStatus,
+} from "../setup/toml-target.js";
+import {
   AGENT_IDS,
   AGENT_REGISTRY,
   parseAgentSelection,
@@ -86,6 +92,32 @@ function printReport(report: PortableReport): void {
   }
 }
 
+function printTomlStatus(status: TomlTargetStatus): void {
+  console.log(`${status.target.label} (${status.target.id})`);
+  console.log(`  Path:    ${status.path}`);
+  console.log(`  Format:  ${status.target.format}`);
+  console.log(`  State:   ${status.state}`);
+  console.log(`  Changed: false`);
+  if (status.error) {
+    console.error(chalk.red(`Error: ${sanitizeTerminalText(status.error)}`));
+  }
+}
+
+function printTomlReport(report: TomlTargetReport): void {
+  console.log(`${report.target.label} (${report.target.id})`);
+  console.log(`  Path:    ${report.path}`);
+  console.log(`  Format:  ${report.target.format}`);
+  console.log(`  State:   ${report.state}`);
+  console.log(`  Outcome: ${report.outcome}`);
+  console.log(`  Changed: ${report.changed}`);
+  if (report.dryRun) {
+    console.log("  Dry run: no files were written");
+  }
+  if (report.error) {
+    console.error(chalk.red(`Error: ${sanitizeTerminalText(report.error)}`));
+  }
+}
+
 function printJsonStatus(status: JsonTargetStatus): void {
   console.log(`${status.target.label} (${status.target.id})`);
   console.log(`  Path:    ${status.path}`);
@@ -132,31 +164,8 @@ function printCatalog(projectPath: string | undefined, homeDir: string | undefin
   }
 }
 
-function tomlPendingMessage(target: AgentTarget): string {
-  return `${target.label} uses TOML; Codex TOML installation is planned for iteration 3, so no file was changed or inspected.`;
-}
-
 function selectedTargets(selection: AgentId[] | undefined): AgentTarget[] {
   return (selection ?? AGENT_IDS).map((id) => AGENT_REGISTRY[id]);
-}
-
-function reportCodexSkip(target: AgentTarget, projectPath: string, homeDir: string | undefined, dryRun: boolean): void {
-  let paths: string[] = [];
-  try {
-    paths = resolveMcpPaths(target, { projectPath, homeDir });
-  } catch {
-    paths = target.mcpPaths;
-  }
-  printJsonReport({
-    target,
-    path: paths.join(", "),
-    state: "absent",
-    outcome: "skipped",
-    changed: false,
-    dryRun,
-    errors: [],
-    warning: tomlPendingMessage(target),
-  });
 }
 
 export async function handleSetupCommand(
@@ -234,22 +243,6 @@ export async function handleSetupCommand(
     let fatal = false;
     const targets = selectedTargets(selection);
     for (const target of targets) {
-      if (target.format === "toml") {
-        let paths: string[];
-        try {
-          paths = resolveMcpPaths(target, { projectPath, homeDir: home });
-        } catch (err) {
-          fatal = true;
-          setupError((err as Error).message);
-          continue;
-        }
-        for (const configPath of paths) {
-          printJsonStatus({ target, path: configPath, state: "absent", changed: false, errors: [] });
-          setupWarning(tomlPendingMessage(target));
-        }
-        continue;
-      }
-
       let paths: string[];
       try {
         paths = resolveMcpPaths(target, { projectPath, homeDir: home });
@@ -259,9 +252,15 @@ export async function handleSetupCommand(
         continue;
       }
       for (const configPath of paths) {
-        const result = getJsonTargetStatus({ target, path: configPath, projectPath });
-        printJsonStatus(result);
-        if (result.state === "malformed") fatal = true;
+        if (target.format === "toml") {
+          const result = getTomlTargetStatus({ target, path: configPath, projectPath });
+          printTomlStatus(result);
+          if (result.error !== undefined || result.errors.length > 0) fatal = true;
+        } else {
+          const result = getJsonTargetStatus({ target, path: configPath, projectPath });
+          printJsonStatus(result);
+          if (result.state === "malformed") fatal = true;
+        }
       }
     }
 
@@ -279,11 +278,6 @@ export async function handleSetupCommand(
 
   if (selection !== undefined) {
     for (const target of selectedTargets(selection)) {
-      if (target.format === "toml") {
-        reportCodexSkip(target, projectPath, home, dryRun);
-        continue;
-      }
-
       let paths: string[];
       try {
         paths = resolveMcpPaths(target, { projectPath, homeDir: home });
@@ -293,17 +287,32 @@ export async function handleSetupCommand(
       }
 
       for (const configPath of paths) {
-        const report = setupJsonTarget({
-          target,
-          path: configPath,
-          projectPath,
-          force,
-          dryRun,
-        });
-        printJsonReport(report);
-        if (report.outcome === "failed") {
-          process.exitCode = 1;
-          return;
+        if (target.format === "toml") {
+          const report = setupTomlTarget({
+            target,
+            path: configPath,
+            projectPath,
+            force,
+            dryRun,
+          });
+          printTomlReport(report);
+          if (report.outcome === "failed") {
+            process.exitCode = 1;
+            return;
+          }
+        } else {
+          const report = setupJsonTarget({
+            target,
+            path: configPath,
+            projectPath,
+            force,
+            dryRun,
+          });
+          printJsonReport(report);
+          if (report.outcome === "failed") {
+            process.exitCode = 1;
+            return;
+          }
         }
       }
     }

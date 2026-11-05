@@ -45,8 +45,17 @@
   `absent` / `registered` / `legacy` / `conflict` / `malformed` states plus `written` / `present` /
   `skipped` / `failed` outcomes. Path resolution expands `{project}`, `{home}`, and
   `{opencodeConfigDir}` and honors `MUNINN_AGENT_<ID>_MCP_PATH` (with the equivalent
-  `HUGINN_AGENT_<ID>_MCP_PATH` fallback). Codex TOML and rules-block installation remain planned for
-  later iterations and are reported as deferred rather than silently installed.
+  `HUGINN_AGENT_<ID>_MCP_PATH` fallback).
+- Codex TOML setup: `muninn setup --agent codex` creates or structurally merges
+  `[mcp_servers.muninn]` in `{home}/.codex/config.toml`, preserving unrelated tables, keys, comments,
+  and formatting where feasible. The writer uses the same path safety, conflict rules, `--project`
+  containment, permissions (`0o600`/`0o700`), exclusive temporary files, atomic rename, symlink refusal,
+  and byte-for-byte idempotency as JSON destinations. Malformed TOML is reported with its path and
+  cause, leaves the original untouched, and `--status` continues aggregating all applicable destination
+  errors before exiting 1. Duplicate table definitions, including repeated `[mcp_servers.muninn]`
+  headers and dotted `mcp_servers.muninn` keys combined with an explicit header, are rejected as
+  malformed without modifying the file. Forced replacement may discard comments and formatting inside
+  the replaced Muninn region. Rules-block installation remains planned for a later iteration.
 
 ## 0.1.0
 
