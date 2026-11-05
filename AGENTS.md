@@ -72,3 +72,11 @@ for the staged setup scope.
 - Add new ADRs to [`ADR.md`](./ADR.md) instead of editing past decisions. Mark unimplemented proposals
   as `Proposed` and keep documentation free of claims that they already exist.
 - Update [`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased` for user-visible changes.
+
+<!-- muninn:rules:start -->
+## Muninn project memory
+
+- Call `muninn_bootstrap` once at the start of a session to load the project brief.
+- Before designing a change, use `muninn_search` and `muninn_inspect_symbol` to check prior decisions and the relevant code.
+- Before completing code, use `muninn_verify_contract` to verify the execution contract.
+<!-- muninn:rules:end -->
