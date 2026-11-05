@@ -1181,6 +1181,33 @@ describe("CLI parser and routing edge cases", () => {
     expect(loggedText()).toContain("TypeScript contracts verified");
   });
 
+  it("reports check diagnostics and sets exit 1 when a contract fails", async () => {
+    fs.writeFileSync(
+      path.join(tempDir, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(tempDir, "broken.ts"),
+      "export const total: number = \"not-a-number\";\n",
+    );
+
+    await main(["check", "broken.ts", "--project", tempDir]);
+
+    expect(process.exitCode).toBe(1);
+    const text = loggedText();
+    expect(text).toContain("TypeScript contracts check failed");
+    expect(text).toContain("broken.ts");
+    expect(text).toContain("ERROR");
+    expect(text).toContain("TS2322");
+  });
+
   it("routes 'setup' through main and keeps the catalog read-only", async () => {
     const home = path.join(tempDir, "home");
     const project = path.join(tempDir, "project");

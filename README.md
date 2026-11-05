@@ -190,12 +190,13 @@ read nor written; `--no-rules` suppresses them for an explicit selection.
 
 A prior `<!-- huginn:muninn-rules:start -->` block is reported as `stale` and left byte-identical
 without `--force`; with `--force` it is replaced while surrounding prose is preserved. Unmatched,
-duplicate, or unterminated managed/legacy markers are fatal and leave the file untouched. Rules paths
-use the same containment and symlink checks as MCP configuration, and writes preserve existing
-permissions or use `0o600` for new files. Status reports `absent`, `present`, or `stale` per rules file
-and identifies the selected agents that share it; normal setup and dry-run report `written`, `present`,
-`stale`, `skipped`, or `failed`. A selected agent binary missing from `PATH` produces a nonfatal `not
-installed` warning and does not change the exit code.
+duplicate, unterminated, crossed, or nested managed/legacy markers are fatal and leave the file
+untouched. Rules paths use the same containment and symlink checks as MCP configuration, and writes
+preserve existing permissions or use `0o600` for new files. Status reports `absent`, `present`, `stale`,
+or `malformed` per rules file and identifies the selected agents that share it; normal setup and dry-run
+report `written`, `present`, `stale`, or `failed`. A selected agent binary missing from `PATH` produces
+a nonfatal `not installed` warning and does not change the exit code. Targets with no meaningful local
+executable (`cursor`, `devin`) are not probed and never warn.
 
 ## Architecture
 
@@ -305,6 +306,8 @@ Muninn has no required environment variables. Configuration is passed as CLI fla
 | `HUGINN_AGENT_<ID>_MCP_PATH` | string (colon-separated paths) | unset | Legacy fallback for `MUNINN_AGENT_<ID>_MCP_PATH`, retained for Huginn compatibility. |
 | `MUNINN_OPENCODE_CONFIG_DIR` | string (directory path) | `{home}/.config/opencode` | Directory used to expand the OpenCode target's `{opencodeConfigDir}` marker. |
 | `HUGINN_OPENCODE_CONFIG_DIR` | string (directory path) | unset | Legacy fallback for `MUNINN_OPENCODE_CONFIG_DIR`, retained for Huginn compatibility. |
+| `PATH` | string (platform path list) | inherited | Used by `muninn setup --agent` to detect each selected agent's executable for the nonfatal `not installed` warning. |
+| `PATHEXT` | string (semicolon-separated extensions, Windows only) | `.EXE;.CMD;.BAT;.COM` | Windows executable extensions used by the same lookup; ignored on other platforms. |
 
 ## Security notes
 

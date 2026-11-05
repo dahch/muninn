@@ -170,6 +170,29 @@ function inspectRules(options: RulesTargetOptions): Inspection {
     };
   }
 
+  // Marker ranges are half-open intervals. The managed and legacy blocks must
+  // be disjoint: crossed or nested ranges make the replacement boundary
+  // ambiguous, so reject them before any edit is planned.
+  if (
+    managed.range !== undefined &&
+    legacy.range !== undefined &&
+    managed.range.start < legacy.range.end &&
+    legacy.range.start < managed.range.end
+  ) {
+    const error =
+      `Malformed ${label} ${check.path}: managed and legacy Huginn marker ranges ` +
+      `overlap or nest (${managed.range.start}-${managed.range.end} and ` +
+      `${legacy.range.start}-${legacy.range.end}); refusing to guess which block to replace`;
+    return {
+      ...base,
+      path: check.path,
+      state: "malformed",
+      raw,
+      error,
+      errors: [error],
+    };
+  }
+
   const state: RulesState =
     legacy.range !== undefined
       ? "stale"
@@ -204,28 +227,37 @@ function applyEdits(
 
 function desiredContent(inspected: Inspection, force: boolean): string {
   const raw = inspected.raw;
-  if (raw === undefined || inspected.state === "absent") return appendBlock(raw);
-  if (inspected.state === "stale") {
-    if (!force) return raw;
-    const edits: Array<{ start: number; end: number; text: string }> = [];
-    if (inspected.legacy !== undefined) {
-      edits.push({ ...inspected.legacy, text: "" });
-    }
-    if (inspected.managed !== undefined) {
-      edits.push({ ...inspected.managed, text: MUNINN_RULES_BLOCK });
-    } else if (inspected.legacy !== undefined) {
-      // Replacing the stale block and removing it in two edits would be wrong;
-      // the legacy range is the insertion point when no managed block exists.
-      edits.length = 0;
-      edits.push({ ...inspected.legacy, text: MUNINN_RULES_BLOCK });
-    }
-    return applyEdits(raw, edits);
+  const managed = inspected.managed;
+  const legacy = inspected.legacy;
+
+  // No file or no block yet: append a fresh managed block.
+  if (raw === undefined || (managed === undefined && legacy === undefined)) {
+    return appendBlock(raw);
   }
-  if (inspected.managed !== undefined) {
+
+  // A legacy block only: leave it untouched unless a forced replacement was
+  // requested, in which case it is replaced in place.
+  if (legacy !== undefined && managed === undefined) {
+    if (!force) return raw;
+    return applyEdits(raw, [{ ...legacy, text: MUNINN_RULES_BLOCK }]);
+  }
+
+  // Managed block only: refresh it in place.
+  if (managed !== undefined && legacy === undefined) {
+    return applyEdits(raw, [{ ...managed, text: MUNINN_RULES_BLOCK }]);
+  }
+
+  // Both blocks exist (inspection guarantees they do not overlap). Without
+  // --force the stale legacy block is preserved; with --force replace the
+  // managed block and remove the legacy block.
+  if (legacy !== undefined && managed !== undefined) {
+    if (!force) return raw;
     return applyEdits(raw, [
-      { ...inspected.managed, text: MUNINN_RULES_BLOCK },
+      { ...managed, text: MUNINN_RULES_BLOCK },
+      { ...legacy, text: "" },
     ]);
   }
+
   return appendBlock(raw);
 }
 
@@ -274,18 +306,24 @@ export function setupRulesTarget(options: RulesTargetOptions): RulesTargetReport
     projectPath: options.projectPath,
   });
   if (!check.ok) {
-    return { ...base, outcome: "failed", changed: false, error: check.reason };
+    return {
+      ...base,
+      outcome: "failed",
+      changed: false,
+      error: check.reason,
+      errors: [...base.errors, check.reason],
+    };
   }
 
   // Re-check immediately before the atomic write, mirroring the MCP writers.
   const existing = lstatOrUndefined(check.path);
   if (existing?.isSymbolicLink()) {
     const error = `${label} ${check.path} is a symlink; refusing to write through it`;
-    return { ...base, outcome: "failed", changed: false, error };
+    return { ...base, outcome: "failed", changed: false, error, errors: [...base.errors, error] };
   }
   if (existing !== undefined && !existing.isFile()) {
     const error = `${label} ${check.path} is not a regular file`;
-    return { ...base, outcome: "failed", changed: false, error };
+    return { ...base, outcome: "failed", changed: false, error, errors: [...base.errors, error] };
   }
 
   const mode = existing === undefined ? 0o600 : existing.mode & 0o777;

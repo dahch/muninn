@@ -34,6 +34,12 @@ export interface AgentTarget {
   mcpPaths: string[];
   /** Rules-file path relative to the project root. */
   rulesFile: string;
+  /**
+   * CLI binary used only for the nonfatal `not installed` diagnostic.
+   * `null` means the target has no meaningful local executable (for example an
+   * IDE or web-hosted agent), so the warning is not applicable.
+   */
+  executable: string | null;
 }
 
 export interface ResolveMcpPathsOptions {
@@ -50,6 +56,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{project}/.cursor/mcp.json", "{home}/.cursor/mcp.json"],
     rulesFile: ".cursorrules",
+    executable: null,
   },
   claude: {
     id: "claude",
@@ -61,6 +68,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
       "{home}/.claude/claude_desktop_config.json",
     ],
     rulesFile: "CLAUDE.md",
+    executable: "claude",
   },
   opencode: {
     id: "opencode",
@@ -68,6 +76,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "opencode",
     mcpPaths: ["{opencodeConfigDir}/opencode.json"],
     rulesFile: "AGENTS.md",
+    executable: "opencode",
   },
   devin: {
     id: "devin",
@@ -75,6 +84,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{project}/.devin/mcp_config.json", "{home}/.config/devin/mcp_config.json"],
     rulesFile: ".windsurf/rules/muninn.md",
+    executable: null,
   },
   qwen: {
     id: "qwen",
@@ -82,6 +92,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.qwen/settings.json"],
     rulesFile: "QWEN.md",
+    executable: "qwen",
   },
   codex: {
     id: "codex",
@@ -89,6 +100,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "toml",
     mcpPaths: ["{home}/.codex/config.toml"],
     rulesFile: "AGENTS.md",
+    executable: "codex",
   },
   agy: {
     id: "agy",
@@ -96,6 +108,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.gemini/config/mcp_config.json", "{project}/.agents/mcp_config.json"],
     rulesFile: "AGENTS.md",
+    executable: "agy",
   },
   kimi: {
     id: "kimi",
@@ -103,6 +116,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.kimi-code/mcp.json", "{project}/.kimi/mcp.json"],
     rulesFile: "AGENTS.md",
+    executable: "kimi",
   },
   pi: {
     id: "pi",
@@ -110,6 +124,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.pi/agent/mcp.json", "{project}/.pi/mcp.json"],
     rulesFile: "AGENTS.md",
+    executable: "pi",
   },
   commandcode: {
     id: "commandcode",
@@ -117,6 +132,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.commandcode/mcp.json", "{project}/.mcp.json"],
     rulesFile: "AGENTS.md",
+    executable: "commandcode",
   },
   omp: {
     id: "omp",
@@ -124,6 +140,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.omp/mcp.json", "{project}/.omp/mcp.json"],
     rulesFile: "AGENTS.md",
+    executable: "omp",
   },
   mcode: {
     id: "mcode",
@@ -131,6 +148,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{project}/.mcp.json"],
     rulesFile: "AGENTS.md",
+    executable: "mcode",
   },
   mimo: {
     id: "mimo",
@@ -138,18 +156,20 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "opencode",
     mcpPaths: ["{home}/.config/mimocode/mimocode.json"],
     rulesFile: "AGENTS.md",
+    executable: "mimo",
   },
 };
 
 export const AGENT_IDS = Object.keys(AGENT_REGISTRY) as AgentId[];
 
 /**
- * Deterministic executable name used only for the nonfatal `not installed`
- * diagnostic. It is intentionally not inferred from whether a config file
- * exists.
+ * Explicit executable name used only for the nonfatal `not installed`
+ * diagnostic. It is intentionally declared per catalog entry and never inferred
+ * from the agent ID or from whether a config file exists. `null` means the
+ * target has no applicable local executable and must not warn.
  */
-export function agentExecutable(id: AgentId): string {
-  return id;
+export function agentExecutable(id: AgentId): string | null {
+  return AGENT_REGISTRY[id].executable;
 }
 
 export function isAgentId(value: string): value is AgentId {

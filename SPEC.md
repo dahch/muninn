@@ -242,6 +242,7 @@ Setup shall include `--project <absolute path>` only for configuration files con
 **AC-22**
 - A stale block is reported and remains byte-identical without `--force`.
 - With `--force`, the stale block is replaced, while unrelated rules-file content is preserved.
+- Unmatched, duplicate, unterminated, crossed, or nested managed/legacy markers are fatal and leave the file untouched.
 - A rules-file path that fails `assertDocPath` is not read or written.
 - Reports identify the rules file associated with each result.
 - `--no-portable --no-rules` without `--agent` is rejected with exit code 1.
@@ -252,17 +253,18 @@ Setup shall include `--project <absolute path>` only for configuration files con
 
 **AC-23**
 - MCP diagnostic states include `absent`, `registered`, `legacy`, `conflict`, and `malformed`.
-- Rules diagnostic states include `absent`, `present`, and `stale`.
+- Rules diagnostic states include `absent`, `present`, `stale`, and `malformed`.
 - Status output includes the relevant file path and per-destination MCP and rules results.
 - `--dry-run` and `--status` do not change file content or modification times and do not create files, directories, or temporary files.
 - The portable appears as a report row when applicable.
 - If `{home}/.huginn/mcp.json` exists, status mentions it as legacy without modifying it.
 
-**REQ-24 — Report outcomes per destination and handle errors deterministically.** Setup shall report MCP results per destination as `written`, `present`, `skipped`, or `failed`, and rules results as `written`, `present`, `stale`, `skipped`, or `failed`. Missing agent binaries shall be warnings, not setup failures. Normal and dry-run executions stop at the first fatal error and retain earlier changes. Status continues inspecting all applicable destinations and reports all errors.
+**REQ-24 — Report outcomes per destination and handle errors deterministically.** Setup shall report MCP results per destination as `written`, `present`, `skipped`, or `failed`, and rules results as `written`, `present`, `stale`, or `failed`. Missing agent binaries shall be warnings, not setup failures. Normal and dry-run executions stop at the first fatal error and retain earlier changes. Status continues inspecting all applicable destinations and reports all errors.
 
 **AC-24**
 - Each destination report distinguishes MCP and rules outcomes and identifies the relevant file, making partial completion visible.
 - If an agent binary is not found in `PATH`, setup still writes or diagnoses its configuration and reports `not installed`.
+- Targets without a meaningful local executable (currently `cursor` and `devin`) are not probed and produce no warning.
 - Missing binaries do not change the exit code.
 - Normal setup and `--dry-run` stop at the first malformed file or protected-path error; changes already made are retained.
 - `--status` continues after malformed files or protected-path errors, reports all applicable results and errors, and returns exit code 1 if any such error occurs.
@@ -284,7 +286,7 @@ Setup shall include `--project <absolute path>` only for configuration files con
 | Entity | An indexed code symbol or file | `id`, `project_id`, `entity_type`, `identifier`, `file_path` |
 | ObservationEntity | Link between an observation and an entity | `observation_id`, `entity_id` |
 | EntityDependency | Directed relationship between code entities | `source_entity_id`, `target_entity_id`, `relation_type` |
-| AgentTarget | A supported agent integration destination | `id`, `label`, format, MCP paths, `rulesFile` |
+| AgentTarget | A supported agent integration destination | `id`, `label`, format, MCP paths, `rulesFile`, `executable` |
 
 Observation lifecycle is `active` → `superseded`. A superseded observation retains its content and points to the newer observation that replaced it. It is excluded from default search/context, but remains counted, exported, inspectable, and available when explicitly requested.
 

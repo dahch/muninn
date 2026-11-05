@@ -11,6 +11,7 @@ import {
 import {
   AGENT_IDS,
   AGENT_REGISTRY,
+  agentExecutable,
   isProjectContained,
   parseAgentSelection,
   resolveMcpPaths,
@@ -601,6 +602,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{project}/.cursor/mcp.json", "{home}/.cursor/mcp.json"],
         rulesFile: ".cursorrules",
+        executable: null,
       },
       claude: {
         label: "Claude Code / Desktop",
@@ -611,78 +613,98 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
           "{home}/.claude/claude_desktop_config.json",
         ],
         rulesFile: "CLAUDE.md",
+        executable: "claude",
       },
       opencode: {
         label: "OpenCode",
         format: "opencode",
         mcpPaths: ["{opencodeConfigDir}/opencode.json"],
         rulesFile: "AGENTS.md",
+        executable: "opencode",
       },
       devin: {
         label: "Devin",
         format: "mcpServers",
         mcpPaths: ["{project}/.devin/mcp_config.json", "{home}/.config/devin/mcp_config.json"],
         rulesFile: ".windsurf/rules/muninn.md",
+        executable: null,
       },
       qwen: {
         label: "Qwen Code",
         format: "mcpServers",
         mcpPaths: ["{home}/.qwen/settings.json"],
         rulesFile: "QWEN.md",
+        executable: "qwen",
       },
       codex: {
         label: "OpenAI Codex CLI",
         format: "toml",
         mcpPaths: ["{home}/.codex/config.toml"],
         rulesFile: "AGENTS.md",
+        executable: "codex",
       },
       agy: {
         label: "Antigravity CLI (agy)",
         format: "mcpServers",
         mcpPaths: ["{home}/.gemini/config/mcp_config.json", "{project}/.agents/mcp_config.json"],
         rulesFile: "AGENTS.md",
+        executable: "agy",
       },
       kimi: {
         label: "Kimi Code CLI",
         format: "mcpServers",
         mcpPaths: ["{home}/.kimi-code/mcp.json", "{project}/.kimi/mcp.json"],
         rulesFile: "AGENTS.md",
+        executable: "kimi",
       },
       pi: {
         label: "Pi coding agent",
         format: "mcpServers",
         mcpPaths: ["{home}/.pi/agent/mcp.json", "{project}/.pi/mcp.json"],
         rulesFile: "AGENTS.md",
+        executable: "pi",
       },
       commandcode: {
         label: "Command Code",
         format: "mcpServers",
         mcpPaths: ["{home}/.commandcode/mcp.json", "{project}/.mcp.json"],
         rulesFile: "AGENTS.md",
+        executable: "commandcode",
       },
       omp: {
         label: "Oh My Pi",
         format: "mcpServers",
         mcpPaths: ["{home}/.omp/mcp.json", "{project}/.omp/mcp.json"],
         rulesFile: "AGENTS.md",
+        executable: "omp",
       },
       mcode: {
         label: "MiniMax Code",
         format: "mcpServers",
         mcpPaths: ["{project}/.mcp.json"],
         rulesFile: "AGENTS.md",
+        executable: "mcode",
       },
       mimo: {
         label: "MiMo Code",
         format: "opencode",
         mcpPaths: ["{home}/.config/mimocode/mimocode.json"],
         rulesFile: "AGENTS.md",
+        executable: "mimo",
       },
     } as const;
 
     for (const id of AGENT_IDS) {
       expect(AGENT_REGISTRY[id]).toEqual({ id, ...expected[id] });
     }
+
+    // Executable policy is explicit: IDE/web targets are not applicable,
+    // CLI targets name their binary directly.
+    expect(agentExecutable("cursor")).toBeNull();
+    expect(agentExecutable("devin")).toBeNull();
+    expect(agentExecutable("claude")).toBe("claude");
+    expect(agentExecutable("codex")).toBe("codex");
+    expect(agentExecutable("pi")).toBe("pi");
   });
 
   it("expands all three markers with platform path APIs", () => {
@@ -2146,7 +2168,7 @@ describe("marked agent rules setup (Iteration 4)", () => {
       await handleSetupCommand({
         "--home": home,
         "--project": project,
-        "--agent": "cursor",
+        "--agent": "pi",
         "--no-portable": true,
       });
     } finally {
@@ -2157,6 +2179,30 @@ describe("marked agent rules setup (Iteration 4)", () => {
 
     expect(process.exitCode).toBe(0);
     expect(loggedText()).toContain("not installed");
+    expect(loggedText()).toContain('binary "pi"');
+    expect(fs.existsSync(path.join(project, ".pi", "mcp.json"))).toBe(true);
+    expect(fs.existsSync(rulesPathFor("pi"))).toBe(true);
+  });
+
+  it("does not warn about a missing binary for a target with no local executable", async () => {
+    const emptyBin = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-empty-bin-"));
+    const previousPath = process.env.PATH;
+    process.env.PATH = emptyBin;
+    try {
+      await handleSetupCommand({
+        "--home": home,
+        "--project": project,
+        "--agent": "cursor",
+        "--no-portable": true,
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      fs.rmSync(emptyBin, { recursive: true, force: true });
+    }
+
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).not.toContain("not installed");
     expect(fs.existsSync(path.join(project, ".cursor", "mcp.json"))).toBe(true);
     expect(fs.existsSync(rulesPathFor("cursor"))).toBe(true);
   });
@@ -2182,10 +2228,245 @@ describe("marked agent rules setup (Iteration 4)", () => {
     }
     expect(failed!.outcome).toBe("failed");
     expect(failed!.error).toContain("rename denied");
+    expect(failed!.errors).toContain(failed!.error);
     expect(fs.existsSync(failedPath)).toBe(false);
     const leftovers = fs
       .readdirSync(path.dirname(failedPath))
       .filter((entry) => entry.endsWith(".tmp"));
     expect(leftovers).toEqual([]);
   });
+
+  it("preserves trailing content and order when replacing its own managed block", () => {
+    const rulesPath = path.join(project, ".cursorrules");
+    const prefix = "# Top\n\nIntro paragraph.\n\n";
+    const suffix = "\n## After\n\nTail line without trailing newline";
+    const original =
+      `${prefix}${MUNINN_RULES_START}\nold managed text\n${MUNINN_RULES_END}${suffix}`;
+    fs.writeFileSync(rulesPath, original);
+
+    const report = setupRulesTarget({ path: rulesPath, agents: ["cursor"], projectPath: project });
+    expect(report.outcome).toBe("written");
+
+    const next = fs.readFileSync(rulesPath, "utf8");
+    expect(next.startsWith(prefix)).toBe(true);
+    expect(next.endsWith(suffix)).toBe(true);
+    expect(next).not.toContain("old managed text");
+    expect(occurrences(next, MUNINN_RULES_START)).toBe(1);
+    expect(next.indexOf(MUNINN_RULES_START)).toBe(prefix.length);
+  });
+
+  it("separates an appended block with a blank line when the file has no trailing newline", () => {
+    const rulesPath = path.join(project, ".cursorrules");
+    const original = "# Rules\nno trailing newline here";
+    fs.writeFileSync(rulesPath, original);
+
+    const first = setupRulesTarget({ path: rulesPath, agents: ["cursor"], projectPath: project });
+    expect(first.outcome).toBe("written");
+    const appended = fs.readFileSync(rulesPath, "utf8");
+    expect(appended.startsWith(`${original}\n\n`)).toBe(true);
+    expect(occurrences(appended, MUNINN_RULES_START)).toBe(1);
+
+    const before = fs.readFileSync(rulesPath);
+    const second = setupRulesTarget({ path: rulesPath, agents: ["cursor"], projectPath: project });
+    expect(second.outcome).toBe("present");
+    expect(fs.readFileSync(rulesPath)).toEqual(before);
+  });
+
+  it("removes a legacy block and replaces the managed block when both are present under --force", () => {
+    const rulesPath = path.join(project, "AGENTS.md");
+    const original =
+      "before\n" +
+      `${LEGACY_RULES_START}\nlegacy body\n${LEGACY_RULES_END}\n` +
+      "middle\n" +
+      `${MUNINN_RULES_START}\nstale managed body\n${MUNINN_RULES_END}\n` +
+      "after\n";
+    fs.writeFileSync(rulesPath, original);
+
+    const status = getRulesTargetStatus({ path: rulesPath, agents: ["pi"], projectPath: project });
+    expect(status.state).toBe("stale");
+
+    const report = setupRulesTarget({
+      path: rulesPath,
+      agents: ["pi"],
+      projectPath: project,
+      force: true,
+    });
+    expect(report.outcome).toBe("written");
+
+    const next = fs.readFileSync(rulesPath, "utf8");
+    expect(next).not.toContain(LEGACY_RULES_START);
+    expect(next).not.toContain("legacy body");
+    expect(next).not.toContain("stale managed body");
+    expect(occurrences(next, MUNINN_RULES_START)).toBe(1);
+    expect(next.indexOf("before")).toBeLessThan(next.indexOf("middle"));
+    expect(next.indexOf("middle")).toBeLessThan(next.indexOf(MUNINN_RULES_START));
+    expect(next.indexOf(MUNINN_RULES_START)).toBeLessThan(next.indexOf("after"));
+  });
+
+  it("rejects a rules file whose end marker precedes its start marker", () => {
+    const rulesPath = path.join(project, ".cursorrules");
+    const raw = `${MUNINN_RULES_END}\ntext\n${MUNINN_RULES_START}\n`;
+    fs.writeFileSync(rulesPath, raw);
+
+    const status = getRulesTargetStatus({ path: rulesPath, agents: ["cursor"], projectPath: project });
+    expect(status.state).toBe("malformed");
+    expect(status.error).toContain("appears before its start marker");
+
+    const report = setupRulesTarget({
+      path: rulesPath,
+      agents: ["cursor"],
+      projectPath: project,
+      force: true,
+    });
+    expect(report.outcome).toBe("failed");
+    expect(fs.readFileSync(rulesPath, "utf8")).toBe(raw);
+  });
+
+  it("reports a forced stale replacement during dry-run without writing", () => {
+    const rulesPath = path.join(project, "AGENTS.md");
+    const original = `before\n${LEGACY_RULES_START}\nold\n${LEGACY_RULES_END}\nafter\n`;
+    fs.writeFileSync(rulesPath, original);
+
+    const report = setupRulesTarget({
+      path: rulesPath,
+      agents: ["pi"],
+      projectPath: project,
+      force: true,
+      dryRun: true,
+    });
+    expect(report.outcome).toBe("written");
+    expect(report.changed).toBe(true);
+    expect(report.dryRun).toBe(true);
+    expect(fs.readFileSync(rulesPath, "utf8")).toBe(original);
+  });
+
+  it("skips rules inspection in --status when --no-rules is supplied", async () => {
+    const rulesPath = rulesPathFor("cursor");
+    const malformed = `${MUNINN_RULES_START}\nunmatched\n`;
+    fs.writeFileSync(rulesPath, malformed);
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "cursor",
+      "--no-portable": true,
+      "--no-rules": true,
+      "--status": true,
+    });
+
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).not.toContain("Muninn rules (");
+    expect(fs.readFileSync(rulesPath, "utf8")).toBe(malformed);
+  });
+
+  it("refuses a rules path whose parent escapes the project through a symlink", () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-rules-outside-"));
+    try {
+      fs.symlinkSync(outside, path.join(project, "shared"));
+      const rulesPath = path.join(project, "shared", "AGENTS.md");
+
+      const status = getRulesTargetStatus({ path: rulesPath, agents: ["pi"], projectPath: project });
+      expect(status.state).toBe("malformed");
+      expect(status.error?.toLowerCase()).toContain("outside the project root");
+
+      const report = setupRulesTarget({
+        path: rulesPath,
+        agents: ["pi"],
+        projectPath: project,
+        force: true,
+      });
+      expect(report.outcome).toBe("failed");
+      expect(fs.existsSync(path.join(outside, "AGENTS.md"))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+  it("rejects crossed and nested managed/legacy marker ranges before planning writes", () => {
+    const rulesPath = path.join(project, "AGENTS.md");
+    const cases = {
+      crossed:
+        "A\n" +
+        `${MUNINN_RULES_START}\nB\n${LEGACY_RULES_START}\nC\n` +
+        `${MUNINN_RULES_END}\nD\n${LEGACY_RULES_END}\nZ\n`,
+      nested:
+        "A\n" +
+        `${MUNINN_RULES_START}\n${LEGACY_RULES_START}\nlegacy body\n` +
+        `${LEGACY_RULES_END}\n${MUNINN_RULES_END}\nZ\n`,
+    };
+
+    for (const [label, raw] of Object.entries(cases)) {
+      fs.writeFileSync(rulesPath, raw);
+      const status = getRulesTargetStatus({
+        path: rulesPath,
+        agents: ["pi"],
+        projectPath: project,
+      });
+      expect(status.state, label).toBe("malformed");
+      expect(status.error, label).toContain("overlap or nest");
+      expect(status.errors.some((entry) => entry.includes("overlap or nest")), label).toBe(true);
+
+      const report = setupRulesTarget({
+        path: rulesPath,
+        agents: ["pi"],
+        projectPath: project,
+        force: true,
+      });
+      expect(report.outcome, label).toBe("failed");
+      expect(report.changed, label).toBe(false);
+      expect(report.error, label).toContain("overlap or nest");
+      expect(report.errors, label).toContain(report.error);
+      expect(fs.readFileSync(rulesPath, "utf8"), label).toBe(raw);
+    }
+  });
+
+  it("exits 0 for stale rules status but 1 for crossed and nested markers", async () => {
+    const rulesPath = path.join(project, "AGENTS.md");
+    const stale =
+      "before\n" +
+      `${LEGACY_RULES_START}\nold huginn rules\n${LEGACY_RULES_END}\n` +
+      "after\n";
+    fs.writeFileSync(rulesPath, stale);
+
+    await handleSetupCommand({
+      "--home": home,
+      "--project": project,
+      "--agent": "pi",
+      "--no-portable": true,
+      "--status": true,
+    });
+    expect(process.exitCode).toBe(0);
+    expect(loggedText()).toContain("State:   stale");
+    expect(fs.readFileSync(rulesPath, "utf8")).toBe(stale);
+
+    const malformedCases = {
+      crossed:
+        "A\n" +
+        `${MUNINN_RULES_START}\nB\n${LEGACY_RULES_START}\nC\n` +
+        `${MUNINN_RULES_END}\nD\n${LEGACY_RULES_END}\nZ\n`,
+      nested:
+        "A\n" +
+        `${MUNINN_RULES_START}\n${LEGACY_RULES_START}\nlegacy body\n` +
+        `${LEGACY_RULES_END}\n${MUNINN_RULES_END}\nZ\n`,
+    };
+
+    for (const [label, malformed] of Object.entries(malformedCases)) {
+      fs.writeFileSync(rulesPath, malformed);
+      process.exitCode = 0;
+      logSpy.mockClear();
+      errorSpy.mockClear();
+
+      await handleSetupCommand({
+        "--home": home,
+        "--project": project,
+        "--agent": "pi",
+        "--no-portable": true,
+        "--status": true,
+      });
+      expect(process.exitCode, label).toBe(1);
+      expect(loggedText(), label).toContain("State:   malformed");
+      expect(loggedText(), label).toContain("overlap or nest");
+      expect(fs.readFileSync(rulesPath, "utf8"), label).toBe(malformed);
+    }
+  });
+
 });

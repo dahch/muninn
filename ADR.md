@@ -195,20 +195,23 @@ marked rules with legacy-block handling).
 
 ## ADR-12: Make Muninn the owner of its agent setup catalog
 
-- **Status**: Proposed
+- **Date**: 2026-11-05
+- **Status**: Accepted (implemented by ADR-15–ADR-18)
 - **Context**: Muninn currently exposes memory through its CLI and MCP server, but users must configure each agent manually or rely on Huginn’s integrator. The Huginn integrator provides a reference catalog of agent IDs, routes, formats, and rules files, but making Huginn a runtime dependency would prevent standalone installation. Alternatives are to keep setup exclusively in Huginn, accept only user-provided configuration paths, or provide a catalog and setup adapter owned by Muninn.
 - **Decision**: Add a Muninn-owned setup subsystem and CLI command that supports the 13 destinations in the integrator reference. Treat that reference as the compatibility baseline for routes and formats, while keeping the catalog and environment overrides in Muninn. Do not change Huginn as part of this decision.
 - **Consequences**: Muninn can configure supported agents without Huginn, and the catalog becomes part of Muninn’s own compatibility contract. The two repositories may have overlapping catalog data and will need coordination if either changes destination definitions. Muninn reports configuration state, not whether an agent is connected or running.
 
 ## ADR-13: Merge agent MCP configuration per file with a portable default
 
-- **Status**: Proposed
+- **Date**: 2026-11-05
+- **Status**: Accepted (implemented by ADR-15–ADR-18)
 - **Context**: Agent MCP configuration formats vary, and overwriting a whole file risks destroying unrelated user settings. A user-level configuration is shared across projects, so pinning it to one project would incorrectly direct all uses to the same memory database. Alternatives include generating snippets only, replacing configuration files wholesale, or performing structured per-entry updates.
 - **Decision**: Have `muninn setup` structurally merge a single `muninn` entry into JSON-based agent configurations and Codex TOML, preserving unrelated content and using the existing path-safety protections described in ADR-9. Use `muninn mcp run` as the configured command. Include `--project` only for configuration files contained within the selected project. Install `{home}/.muninn/mcp.json` as the portable configuration by default; `--no-portable` suppresses it when agent destinations are selected. Write changed files atomically with restrictive permissions, and do not overwrite a different `muninn` entry without `--force`.
 - **Consequences**: Setup can preserve existing agent configuration while supporting both project-specific and shared user configuration. Without a TOML dependency, TOML merging must be implemented and tested within the project. Atomicity applies per file, not across a multi-destination setup: on a fatal error the command stops, retains earlier successful writes, and reports partial results. Read-only status and dry-run modes must not create files or directories.
 
 ## ADR-14: Manage agent rules as marked human-authored content
 
+- **Date**: 2026-11-05
 - **Status**: Accepted (implemented by ADR-18)
 - **Context**: MCP configuration is machine-readable configuration, while an agent’s rules file is human-authored prose that may contain unrelated instructions. Replacing that file or appending unmarked text risks losing user content or creating duplicate instructions. The Huginn integrator may also have inserted an older Muninn rules block. Alternatives include leaving rule installation entirely manual, replacing whole rules files, or managing a clearly delimited block in place.
 - **Decision**: When setup selects one or more agent destinations, install Muninn usage guidance by default as a marked `muninn:rules` block. Append it to existing rules files or create a missing file, and on later runs replace only Muninn’s own marked block. Detect the prior `huginn:muninn-rules` block as stale: preserve it without `--force`, and replace it with the Muninn block when forced. Do not modify rules files when setup selects no agents or when `--no-rules` is used. Validate rules paths with the same path-safety checks as configuration paths.

@@ -38,8 +38,8 @@ Vitest default; the repository config sets a 20-second timeout.
 - `src/commands/` — CLI handlers for memory, MCP, contract verification, and setup.
 - `src/setup/` — agent catalog and path resolution (`registry.ts`), JSON `mcpServers` / OpenCode `mcp`
   target merging (`json-target.ts`), dependency-free Codex TOML merge/diagnostics (`toml-target.ts`),
-  and the portable MCP configuration installer/diagnostic (`portable.ts`). The rules writer described
-  in `SPEC.md` is not implemented yet.
+  the portable MCP configuration installer/diagnostic (`portable.ts`), and the marked agent rules
+  writer/diagnostic (`rules-target.ts`), including legacy Huginn-block detection and replacement.
 - `src/contracts/` — in-process TypeScript contract verification.
 - `src/util/` — terminal sanitization and path safety.
 

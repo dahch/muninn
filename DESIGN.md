@@ -1103,8 +1103,9 @@ export interface SymbolInspection {
 
 ## 7. Agent Setup — Catalog, JSON/TOML Destinations, Rules, and Portable MCP Configuration
 
-`src/setup/registry.ts` holds the 13-destination catalog, path resolver, and deterministic binary
-mapping used for `not installed` warnings; `src/setup/json-target.ts` shares JSON inspection, merging,
+`src/setup/registry.ts` holds the 13-destination catalog, path resolver, and explicit per-target
+executable mapping used for `not installed` warnings (`null` for IDE/web targets such as `cursor` and
+`devin`, which are never probed); `src/setup/json-target.ts` shares JSON inspection, merging,
 and atomic writing for `mcpServers` and OpenCode `mcp` targets; `src/setup/toml-target.ts` provides a
 dependency-free TOML parser, structural Codex merge, and diagnostics; `src/setup/rules-target.ts` owns
 marked rules inspection, legacy detection, deduplication, and safe writing; `src/setup/portable.ts` owns
@@ -1147,13 +1148,13 @@ rewritten.
 
 A complete `<!-- huginn:muninn-rules:start -->` block is diagnosed as `stale`. Without `--force` it is
 left byte-identical and reported as `stale`; with `--force` it is replaced by the managed block while
-surrounding content remains. Unmatched, duplicate, or end-before-start markers, including an
-unterminated legacy block, are fatal because the safe replacement boundary is ambiguous. Like MCP
-configuration, a rules path is screened with `checkDocPath` for inspection and `assertDocPath`
-immediately before writing, a final symlink or non-regular file is refused, and writes reuse
-`safeWriteAtomic` with existing-mode preservation or `0o600` for new files. Status is read-only and
-reports `absent` / `present` / `stale`; normal and dry-run report `written` / `present` / `stale` /
-`skipped` / `failed`.
+surrounding content remains. Unmatched, duplicate, end-before-start, crossed, or nested markers,
+including an unterminated legacy block, are fatal because the safe replacement boundary is ambiguous.
+Like MCP configuration, a rules path is screened with `checkDocPath` for inspection and
+`assertDocPath` immediately before writing, a final symlink or non-regular file is refused, and writes
+reuse `safeWriteAtomic` with existing-mode preservation or `0o600` for new files. Status is read-only
+and reports `absent` / `present` / `stale` / `malformed`; normal and dry-run report `written` /
+`present` / `stale` / `failed`.
 
 ### Codex TOML target
 
@@ -1247,5 +1248,5 @@ malformed file during `--dry-run` or `--status`), an invalid `--home` or `--proj
 or unknown `--agent`, `--no-portable` without `--agent`, an incompatible `--list` combination, or an
 unknown top-level command. Normal setup and dry-run stop at the first fatal file error and retain earlier
 successful writes; status continues through all applicable destinations and reports every error. Rules
-results use `written`/`present`/`stale`/`skipped`/`failed`, report the shared rules path and its selected
-agents, and never change the MCP outcome or exit code unless the rules operation itself fails.
+results use `written`/`present`/`stale`/`failed`, report the shared rules path and its selected agents,
+and never change the MCP outcome or exit code unless the rules operation itself fails.

@@ -41,7 +41,7 @@ export function printSetupUsage(): void {
   console.log(`muninn setup — Install and diagnose Muninn agent integrations
 
 Usage:
-  muninn setup [--portable] [--force] [--dry-run] [--status] [--list]
+  muninn setup [--portable] [--no-rules] [--force] [--dry-run] [--status] [--list]
                [--agent <id|all|id,id>] [--project <path>] [--home <path>]
 
 Options:
@@ -102,6 +102,9 @@ function isExecutableAvailable(binary: string, envPath: string | undefined): boo
 function warnMissingBinaries(targets: AgentTarget[]): void {
   for (const target of targets) {
     const binary = agentExecutable(target.id);
+    // Targets without a meaningful local executable (IDE/web agents) are
+    // explicitly marked as not applicable and never warn.
+    if (binary === null) continue;
     if (!isExecutableAvailable(binary, process.env.PATH)) {
       setupWarning(`${target.label} (${target.id}) binary "${binary}" is not installed in PATH`);
     }
