@@ -16,3 +16,4 @@ coverage/
 # and `npm pack` tarballs are local artifacts, not sources.
 pnpm-lock.yaml
 *.tgz
+.pi/
