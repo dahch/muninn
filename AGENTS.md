@@ -78,5 +78,9 @@ for the staged setup scope.
 
 - Call `muninn_bootstrap` once at the start of a session to load the project brief.
 - Before designing a change, use `muninn_search` and `muninn_inspect_symbol` to check prior decisions and the relevant code.
+- When a session settles something the project should remember — a convention, a tradeoff, a
+  discovered constraint, or a bug that took real work — record it with `muninn_save` before you
+  finish. Use a `topicKey` for anything a later decision could replace, so the newer one supersedes
+  it instead of contradicting it.
 - Before completing code, use `muninn_verify_contract` to verify the execution contract.
 <!-- muninn:rules:end -->
