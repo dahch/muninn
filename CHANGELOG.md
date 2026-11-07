@@ -1,14 +1,20 @@
 # Changelog
 
-## 0.2.0
+## 0.2.1
 
-### Added
+### Changed
 
 - The injected rules now ask for a **write**, not only for reads. They told an agent to bootstrap,
   search, inspect and verify — every one of those reads — so a session that settled a convention or a
   tradeoff left nothing behind, and memory only grew through Huginn's cycle. `muninn_save` is now part
   of the block, with the `topicKey` advice that makes a later decision supersede the earlier one
-  instead of contradicting it.
+  instead of contradicting it. The new rule ships in `MUNINN_RULES_BLOCK`, so every rules destination
+  written by `muninn setup` carries it, and the setup tests assert both `muninn_save` and `topicKey`
+  are present.
+
+## 0.2.0
+
+### Added
 
 - Decision supersession: `saveObservation` accepts `supersedesTopicKey`, atomically marking the
   same project's active decisions with the matching topic key as `superseded` and recording the

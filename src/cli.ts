@@ -19,7 +19,7 @@ import { handleMcpCommand, handleMemoryCommand } from "./commands/memory.js";
 import { handleCheckCommand } from "./commands/check.js";
 import { handleSetupCommand } from "./commands/setup.js";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.2.1";
 
 export interface ParsedArgs {
   [key: string]: string | boolean | undefined | string[];
