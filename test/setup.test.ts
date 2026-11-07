@@ -1924,6 +1924,10 @@ describe("marked agent rules setup (Iteration 4)", () => {
       expect(content).toContain("muninn_bootstrap");
       expect(content).toContain("muninn_search");
       expect(content).toContain("muninn_inspect_symbol");
+      // The block must ask for a write, not only for reads: memory that is
+      // never recorded outside Huginn's cycle is not memory anyone inherits.
+      expect(content).toContain("muninn_save");
+      expect(content).toContain("topicKey");
       expect(content).toContain("muninn_verify_contract");
       expect(content).not.toMatch(/huginn/i);
       expect(occurrences(content, MUNINN_RULES_START)).toBe(1);
