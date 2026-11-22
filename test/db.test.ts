@@ -19,6 +19,11 @@ import {
   type ObservationCategory,
   type EntityType,
 } from "../src/db/client.js";
+import {
+  memoryDbPath,
+  muninnHome,
+  resolveProjectContext,
+} from "../src/project/identity.js";
 
 
 describe("Muninn Database Layer & SQLite FTS5 Schema", () => {
@@ -42,27 +47,34 @@ describe("Muninn Database Layer & SQLite FTS5 Schema", () => {
       );
     });
 
-    it("resolves to <git_root>/.huginn/muninn.db when inside a git repository", () => {
-      const gitRoot = findGitRoot(process.cwd());
-      expect(gitRoot).not.toBeNull();
+    it("resolves to portable per-project storage inside a git repository", () => {
+      const context = resolveProjectContext({ explicitRoot: process.cwd() });
+      expect(context.kind).toBe("git");
       const resolved = resolveDatabasePath(undefined, process.cwd());
-      expect(resolved).toBe(path.join(gitRoot!, ".huginn", "muninn.db"));
+      expect(resolved).toBe(memoryDbPath(context.uid));
+      expect(resolved.startsWith(muninnHome())).toBe(true);
     });
 
-    it("resolves to <git_root>/.huginn/muninn.db from subdirectories of a git repository", () => {
+    it("resolves a subdirectory to the same project storage as its repository root", () => {
       const gitRoot = findGitRoot(process.cwd());
       const subDir = path.join(process.cwd(), "src", "db");
       const resolved = resolveDatabasePath(undefined, subDir);
-      expect(resolved).toBe(path.join(gitRoot!, ".huginn", "muninn.db"));
+      expect(resolved).toBe(resolveDatabasePath(undefined, gitRoot!));
+      expect(resolved).not.toContain(path.join(gitRoot!, ".huginn"));
     });
 
-    it("falls back to ~/.huginn/muninn.db when no .git is found", () => {
-      const tempNonGit = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-no-git-"));
+    it("gives every non-git directory its own isolated database", () => {
+      const first = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-no-git-a-"));
+      const second = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-no-git-b-"));
       try {
-        const resolved = resolveDatabasePath(undefined, tempNonGit);
-        expect(resolved).toBe(path.join(os.homedir(), ".huginn", "muninn.db"));
+        const firstPath = resolveDatabasePath(undefined, first);
+        const secondPath = resolveDatabasePath(undefined, second);
+        expect(firstPath).toBe(memoryDbPath(resolveProjectContext({ explicitRoot: first }).uid));
+        expect(firstPath).not.toBe(secondPath);
+        expect(firstPath.startsWith(muninnHome())).toBe(true);
       } finally {
-        fs.rmdirSync(tempNonGit);
+        fs.rmdirSync(first);
+        fs.rmdirSync(second);
       }
     });
 
@@ -88,11 +100,9 @@ describe("Muninn Database Layer & SQLite FTS5 Schema", () => {
       }
     });
 
-    it("treats empty string '' as unprovided and falls back to git root or homedir", () => {
-      const gitRoot = findGitRoot(process.cwd());
-      expect(gitRoot).not.toBeNull();
-      const resolved = resolveDatabasePath("", process.cwd());
-      expect(resolved).toBe(path.join(gitRoot!, ".huginn", "muninn.db"));
+    it("treats empty string '' as unprovided and resolves portable storage", () => {
+      const context = resolveProjectContext({ explicitRoot: process.cwd() });
+      expect(resolveDatabasePath("", process.cwd())).toBe(memoryDbPath(context.uid));
     });
   });
 
@@ -1025,8 +1035,11 @@ describe("Muninn one-root resolution (ADR-49)", () => {
     const db = getDatabase(undefined, project);
     try {
       // The cwd here is the huginn repository, not the project.
-      expect(db.name).toBe(path.join(project, ".huginn", "muninn.db"));
-      expect(fs.existsSync(path.join(project, ".huginn", "muninn.db"))).toBe(true);
+      const expected = memoryDbPath(
+        resolveProjectContext({ explicitRoot: project }).uid
+      );
+      expect(db.name).toBe(expected);
+      expect(fs.existsSync(expected)).toBe(true);
     } finally {
       db.close();
     }
@@ -1054,13 +1067,15 @@ describe("Muninn one-root resolution (ADR-49)", () => {
     }
   });
 
-  it("refuses a repository-shipped .huginn symlink instead of writing through it (SEC-005)", () => {
+  it("refuses a symlinked database at the portable storage path (SEC-005)", () => {
     const project = gitRepo("symlinked");
     const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "muninn-outside-")));
     roots.push(outside);
-    fs.symlinkSync(outside, path.join(project, ".huginn"), "dir");
+    const dbPath = memoryDbPath(resolveProjectContext({ explicitRoot: project }).uid);
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    fs.symlinkSync(path.join(outside, "victim.db"), dbPath, "file");
 
-    expect(() => getDatabase(undefined, project)).toThrow(/outside the project root|symlink/i);
+    expect(() => getDatabase(undefined, project)).toThrow(/symlink/i);
     expect(fs.readdirSync(outside)).toEqual([]);
   });
 });

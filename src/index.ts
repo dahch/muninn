@@ -15,6 +15,7 @@
  * `/contracts`, `/util`) expose the same modules without the barrel.
  */
 export * from "./db/client.js";
+export * from "./project/identity.js";
 export * from "./service/index.js";
 export * from "./indexer/index.js";
 export * from "./mcp/index.js";

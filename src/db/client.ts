@@ -5,6 +5,17 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { assertDocPath } from "../util/path-safety.js";
+import {
+  deriveProjectUid,
+  findGitCommonRoot,
+  memoryDbPath,
+  projectStorageDir,
+  readGitRemote,
+  resolveProjectContext,
+  sanitizeGitRemote,
+} from "../project/identity.js";
+
+export { sanitizeGitRemote };
 
 export type ObservationCategory =
   | "decision"
@@ -15,9 +26,18 @@ export type ObservationCategory =
 
 export interface Project {
   id: string;
+  /** Stable identity shared by every path and machine a project is seen at. */
+  uid?: string | null;
   name: string;
   git_remote: string | null;
+  /** Extra remotes seen for the same project (JSON-encoded in storage). */
+  git_remotes?: string | null;
+  /** `git` when the project lives in a repository, `directory` otherwise. */
+  kind?: string | null;
+  /** Alias paths (JSON-encoded in storage). */
+  aliases?: string | null;
   root_path: string;
+  last_seen_at?: string | null;
   created_at: string;
 }
 
@@ -32,6 +52,16 @@ export interface Observation {
   topic_key: string | null;
   status: ObservationStatus;
   superseded_by: string | null;
+  /** `project` (default) or `global` for cross-project preferences. */
+  scope?: string | null;
+  /** Agent that wrote the observation, when the caller supplied one. */
+  agent?: string | null;
+  /** Session/handoff correlation id. */
+  session_id?: string | null;
+  /** JSON-encoded array of tags. */
+  tags?: string | null;
+  /** JSON-encoded array of file paths the observation refers to. */
+  files?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -73,6 +103,14 @@ export interface EnsureProjectOptions {
   rootPath?: string;
   name?: string;
   gitRemote?: string;
+  /** Stable project identity resolved by the `src/project` layer. */
+  uid?: string;
+  /** `git` or `directory`. */
+  kind?: "git" | "directory";
+  /** Additional remotes seen for the same project. */
+  gitRemotes?: string[];
+  /** Alias paths (a moved project, a subdirectory used as a project root). */
+  aliases?: string[];
   /**
    * Start directory for the git-root **fallback** when no `rootPath` is given.
    * Callers that also choose the database path pass the same directory, so the
@@ -83,18 +121,25 @@ export interface EnsureProjectOptions {
 }
 
 export const SCHEMA_SQL = `-- Muninn Engine Database Schema
--- Version 1.0.0
+-- Version 2.0.0 (user_version = 2)
 
 -- Projects table
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
+  uid TEXT,
   name TEXT NOT NULL,
   git_remote TEXT,
+  git_remotes TEXT,
+  kind TEXT CHECK(kind IN ('git', 'directory')) DEFAULT 'directory',
+  aliases TEXT,
   root_path TEXT NOT NULL UNIQUE,
+  last_seen_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_root_path ON projects(root_path);
+-- idx_projects_uid is created by the v2 migration, after older databases gain
+-- the uid column (a partial index cannot be created before the column exists).
 
 -- Observations table
 CREATE TABLE IF NOT EXISTS observations (
@@ -106,6 +151,11 @@ CREATE TABLE IF NOT EXISTS observations (
   topic_key TEXT,
   status TEXT CHECK(status IN ('active', 'superseded')) NOT NULL DEFAULT 'active',
   superseded_by TEXT,
+  scope TEXT CHECK(scope IN ('project', 'global')) DEFAULT 'project',
+  agent TEXT,
+  session_id TEXT,
+  tags TEXT,
+  files TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -180,6 +230,170 @@ CREATE TABLE IF NOT EXISTS entity_dependencies (
 
 CREATE INDEX IF NOT EXISTS idx_entity_deps_source ON entity_dependencies(source_entity_id);
 CREATE INDEX IF NOT EXISTS idx_entity_deps_target ON entity_dependencies(target_entity_id);
+-- Observation metadata (v3): provenance and applicability.
+-- Session handoffs (v3): the "where we left off" record.
+CREATE TABLE IF NOT EXISTS handoffs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  state TEXT NOT NULL,
+  status TEXT CHECK(status IN ('active', 'superseded', 'closed')) NOT NULL DEFAULT 'active',
+  agent TEXT,
+  session_id TEXT,
+  branch TEXT,
+  files_touched TEXT,
+  open_questions TEXT,
+  next_steps TEXT,
+  decisions TEXT,
+  blockers TEXT,
+  superseded_by TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoffs_project_status ON handoffs(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_handoffs_project_updated ON handoffs(project_id, updated_at DESC);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS handoffs_fts USING fts5(
+  goal,
+  state,
+  open_questions,
+  next_steps,
+  content='handoffs',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS handoffs_ai AFTER INSERT ON handoffs BEGIN
+  INSERT INTO handoffs_fts(rowid, goal, state, open_questions, next_steps)
+  VALUES (new.rowid, new.goal, new.state, new.open_questions, new.next_steps);
+END;
+
+CREATE TRIGGER IF NOT EXISTS handoffs_ad AFTER DELETE ON handoffs BEGIN
+  INSERT INTO handoffs_fts(handoffs_fts, rowid, goal, state, open_questions, next_steps)
+  VALUES ('delete', old.rowid, old.goal, old.state, old.open_questions, old.next_steps);
+END;
+
+CREATE TRIGGER IF NOT EXISTS handoffs_au AFTER UPDATE ON handoffs BEGIN
+  INSERT INTO handoffs_fts(handoffs_fts, rowid, goal, state, open_questions, next_steps)
+  VALUES ('delete', old.rowid, old.goal, old.state, old.open_questions, old.next_steps);
+  INSERT INTO handoffs_fts(rowid, goal, state, open_questions, next_steps)
+  VALUES (new.rowid, new.goal, new.state, new.open_questions, new.next_steps);
+END;
+
+-- Code graph (v4): files, symbols and the edges between them.
+CREATE TABLE IF NOT EXISTS code_files (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  index_root TEXT NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  bytes INTEGER,
+  lines INTEGER,
+  mtime_ms INTEGER,
+  is_test INTEGER NOT NULL DEFAULT 0,
+  is_generated INTEGER NOT NULL DEFAULT 0,
+  indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(project_id, index_root, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_files_project ON code_files(project_id, index_root);
+
+CREATE TABLE IF NOT EXISTS code_symbols (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  file_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  qualified_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  start_col INTEGER,
+  signature TEXT,
+  doc TEXT,
+  visibility TEXT,
+  is_exported INTEGER NOT NULL DEFAULT 0,
+  parent_symbol_id TEXT,
+  language TEXT,
+  UNIQUE(project_id, qualified_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_symbols_project_name ON code_symbols(project_id, name);
+CREATE INDEX IF NOT EXISTS idx_code_symbols_file ON code_symbols(file_id);
+
+CREATE TABLE IF NOT EXISTS code_edges (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  src_id TEXT,
+  dst_id TEXT,
+  kind TEXT NOT NULL,
+  line INTEGER,
+  confidence TEXT NOT NULL DEFAULT 'heuristic',
+  resolution TEXT NOT NULL DEFAULT 'resolved',
+  target_name TEXT,
+  UNIQUE(project_id, src_id, dst_id, kind, line)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_edges_src ON code_edges(project_id, src_id, kind);
+CREATE INDEX IF NOT EXISTS idx_code_edges_dst ON code_edges(project_id, dst_id, kind);
+
+CREATE TABLE IF NOT EXISTS code_index_state (
+  project_id TEXT NOT NULL,
+  index_root TEXT NOT NULL,
+  path TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  indexed_at DATETIME,
+  indexer_version INTEGER,
+  PRIMARY KEY(project_id, index_root, path)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS code_symbols_fts USING fts5(
+  name,
+  qualified_name,
+  signature,
+  doc,
+  content='code_symbols',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS code_symbols_ai AFTER INSERT ON code_symbols BEGIN
+  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc)
+  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc);
+END;
+
+CREATE TRIGGER IF NOT EXISTS code_symbols_ad AFTER DELETE ON code_symbols BEGIN
+  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc)
+  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc);
+END;
+
+CREATE TRIGGER IF NOT EXISTS code_symbols_au AFTER UPDATE ON code_symbols BEGIN
+  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc)
+  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc);
+  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc)
+  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS code_files_fts USING fts5(
+  path,
+  content='code_files',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS code_files_ai AFTER INSERT ON code_files BEGIN
+  INSERT INTO code_files_fts(rowid, path) VALUES (new.rowid, new.path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS code_files_ad AFTER DELETE ON code_files BEGIN
+  INSERT INTO code_files_fts(code_files_fts, rowid, path)
+  VALUES ('delete', old.rowid, old.path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS code_files_au AFTER UPDATE ON code_files BEGIN
+  INSERT INTO code_files_fts(code_files_fts, rowid, path)
+  VALUES ('delete', old.rowid, old.path);
+  INSERT INTO code_files_fts(rowid, path) VALUES (new.rowid, new.path);
+END;
 `;
 
 /**
@@ -199,28 +413,6 @@ export function loadSchemaSql(): string {
     // Ignore and fallback to embedded schema
   }
   return SCHEMA_SQL;
-}
-
-/**
- * Strips embedded basic auth credentials (e.g. https://user:pass@host/... -> https://host/...)
- * from a git remote URL before saving git_remote.
- */
-export function sanitizeGitRemote(rawUrl: string): string {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.username || parsed.password) {
-      if (parsed.protocol === "ssh:" && !parsed.password) {
-        return rawUrl;
-      }
-      parsed.username = "";
-      parsed.password = "";
-      return parsed.toString();
-    }
-    return rawUrl;
-  } catch {
-    // Regex fallback for non-standard URLs or git SCP-like syntax
-    return rawUrl.replace(/^([a-zA-Z+-]+:\/\/)[^/@]+@/, "$1");
-  }
 }
 
 /**
@@ -263,9 +455,14 @@ export function tryGetGitRemote(gitRoot: string): string | null {
 
 /**
  * Resolves the database path for Muninn.
- * - If customPath is given, return it (e.g. ':memory:' or specific path).
- * - Check if cwd (or startDir) or any parent directory has .git. If so, resolve to `<git_root>/.huginn/muninn.db`.
- * - Fallback to `join(homedir(), '.huginn', 'muninn.db')`.
+ *
+ * - An explicit `customPath` always wins (a file path or `:memory:`).
+ * - Otherwise the project context decides: `$MUNINN_HOME/projects/<uid>/memory.db`,
+ *   where the uid comes from the committed `.muninn/project.json` marker, the Git
+ *   remote, or the resolved path. Every project — Git or not, worktree or clone —
+ *   therefore gets its own file.
+ * - `MUNINN_LEGACY_STORAGE=1` restores the pre-0.3 resolution
+ *   (`<git-root>/.huginn/muninn.db` / `~/.huginn/muninn.db`) for migration work.
  */
 export function resolveDatabasePath(
   customPath?: string,
@@ -274,11 +471,15 @@ export function resolveDatabasePath(
   if (customPath !== undefined && customPath !== "") {
     return customPath;
   }
-  const gitRoot = findGitRoot(startDir);
-  if (gitRoot) {
-    return path.join(gitRoot, ".huginn", "muninn.db");
+  if (process.env.MUNINN_LEGACY_STORAGE === "1") {
+    const gitRoot = findGitRoot(startDir);
+    if (gitRoot) {
+      return path.join(gitRoot, ".huginn", "muninn.db");
+    }
+    return path.join(os.homedir(), ".huginn", "muninn.db");
   }
-  return path.join(os.homedir(), ".huginn", "muninn.db");
+  const context = resolveProjectContext({ startDir, explicitRoot: startDir });
+  return memoryDbPath(context.uid);
 }
 
 /**
@@ -317,30 +518,109 @@ export function getDatabase(dbPath?: string, startDir?: string): Database.Databa
 
     const schema = loadSchemaSql();
     db.exec(schema);
-
-    // Databases created before decision supersession lack these columns. Keep
-    // the migration column-by-column and idempotent, so reopening never touches
-    // an already migrated row, index, or trigger.
-    const columns = new Set(
-      db
-        .prepare<[], { name: string }>("PRAGMA table_info(observations)")
-        .all()
-        .map((column) => column.name)
-    );
-    if (!columns.has("status")) {
-      db.exec(
-        "ALTER TABLE observations ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded'))"
-      );
-    }
-    if (!columns.has("superseded_by")) {
-      db.exec("ALTER TABLE observations ADD COLUMN superseded_by TEXT");
-    }
+    migrateDatabase(db);
   } catch (err) {
     db.close();
     throw err;
   }
 
   return db;
+}
+
+/** Current schema version tracked in `PRAGMA user_version`. */
+export const SCHEMA_VERSION = 4;
+
+function tableColumns(db: Database.Database, table: string): Set<string> {
+  const rows = db
+    .prepare<[], { name: string }>(`PRAGMA table_info(${table})`)
+    .all();
+  return new Set(rows.map((column) => column.name));
+}
+
+/**
+ * Applies every idempotent migration up to {@link SCHEMA_VERSION}.
+ *
+ * The DDL in `schema.sql` already creates the current shape for a fresh
+ * database; this function covers databases created by earlier versions. Each
+ * step is guarded by `PRAGMA table_info`, so reopening a migrated database is a
+ * no-op and never rewrites a row, index or trigger.
+ */
+export function migrateDatabase(db: Database.Database): number {
+  const current = Number(db.pragma("user_version", { simple: true }) ?? 0);
+  if (current >= SCHEMA_VERSION) return current;
+
+  db.transaction(() => {
+    // v1 → v2: decision supersession columns (idempotent for very old databases).
+    const observationColumns = tableColumns(db, "observations");
+    if (!observationColumns.has("status")) {
+      db.exec(
+        "ALTER TABLE observations ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded'))"
+      );
+    }
+    if (!observationColumns.has("superseded_by")) {
+      db.exec("ALTER TABLE observations ADD COLUMN superseded_by TEXT");
+    }
+
+    // v1 → v2: portable project identity.
+    const projectColumns = tableColumns(db, "projects");
+    const additions: Array<[string, string]> = [
+      ["uid", "TEXT"],
+      ["git_remotes", "TEXT"],
+      ["kind", "TEXT DEFAULT 'directory'"],
+      ["aliases", "TEXT"],
+      ["last_seen_at", "DATETIME"],
+    ];
+    for (const [column, type] of additions) {
+      if (!projectColumns.has(column)) {
+        db.exec(`ALTER TABLE projects ADD COLUMN ${column} ${type}`);
+      }
+    }
+    db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_uid ON projects(uid) WHERE uid IS NOT NULL"
+    );
+
+    const unbackfilled = db
+      .prepare<[], { id: string }>("SELECT id FROM projects WHERE uid IS NULL")
+      .all();
+    if (unbackfilled.length > 0) {
+      const update = db.prepare("UPDATE projects SET uid = ? WHERE id = ?");
+      for (const row of unbackfilled) {
+        const digest = crypto
+          .createHash("sha256")
+          .update(`legacy:${row.id}`)
+          .digest("hex")
+          .slice(0, 20);
+        update.run(`p-${digest}`, row.id);
+      }
+    }
+    db.exec(
+      "UPDATE projects SET last_seen_at = COALESCE(last_seen_at, created_at) WHERE last_seen_at IS NULL"
+    );
+
+    // v2 → v3: observation provenance/applicability. The handoffs table and its
+    // FTS index are created by `schema.sql` (`CREATE TABLE IF NOT EXISTS`), so
+    // this step only backfills the columns of an older `observations` table.
+    const v3ObservationColumns = tableColumns(db, "observations");
+    const observationAdditions: Array<[string, string]> = [
+      ["scope", "TEXT DEFAULT 'project'"],
+      ["agent", "TEXT"],
+      ["session_id", "TEXT"],
+      ["tags", "TEXT"],
+      ["files", "TEXT"],
+    ];
+    for (const [column, type] of observationAdditions) {
+      if (!v3ObservationColumns.has(column)) {
+        db.exec(`ALTER TABLE observations ADD COLUMN ${column} ${type}`);
+      }
+    }
+    db.exec(
+      "UPDATE observations SET scope = 'project' WHERE scope IS NULL"
+    );
+
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  })();
+
+  return SCHEMA_VERSION;
 }
 
 /**
@@ -391,7 +671,16 @@ export function getReadOnlyDatabase(
 export const openReadOnlyDatabase = getReadOnlyDatabase;
 
 /**
- * Finds an existing project by root_path or creates a new project record idempotently.
+ * Finds an existing project by root_path or creates a new project record
+ * idempotently.
+ *
+ * Identity is triple-keyed so a project survives moves and clones:
+ *
+ * 1. `root_path` — the exact directory (the original behaviour);
+ * 2. `uid` — the stable identity from `.muninn/project.json`, the Git remote or
+ *    the resolved path. When a known uid shows up at a new root (a moved folder,
+ *    a second machine) the existing row is adopted instead of duplicated;
+ * 3. a derived remote, so two clones of the same repository share memory.
  */
 export function ensureProject(
   db: Database.Database,
@@ -404,22 +693,84 @@ export function ensureProject(
 
   const existing = db
     .prepare<[string], Project>(
-      "SELECT id, name, git_remote, root_path, created_at FROM projects WHERE root_path = ?"
+      "SELECT id, uid, name, git_remote, root_path, kind, created_at, last_seen_at FROM projects WHERE root_path = ?"
     )
     .get(rootPath);
 
+  const gitRoot = findGitCommonRoot(rootPath) ?? findGitRoot(rootPath);
+  const rawRemote =
+    options?.gitRemote ??
+    (gitRoot ? readGitRemote(gitRoot) : null) ??
+    tryGetGitRemote(rootPath) ??
+    null;
+  const gitRemote = rawRemote ? sanitizeGitRemote(rawRemote) : null;
+  const uid = options?.uid ?? deriveProjectUid({ gitRemote, rootPath });
+  const kind = options?.kind ?? (gitRoot ? "git" : "directory");
+  const gitRemotesJson = options?.gitRemotes?.length
+    ? JSON.stringify([...new Set(options.gitRemotes)])
+    : null;
+  const aliasesJson = options?.aliases?.length
+    ? JSON.stringify([...new Set(options.aliases.map((item) => path.resolve(item)))])
+    : null;
+
   if (existing) {
-    return existing;
+    // Adopt a marker/remote-derived uid on a row created before identity existed,
+    // unless another row already owns it.
+    const shouldAdoptUid = uid !== existing.uid && uid.length > 0;
+    const conflict = shouldAdoptUid
+      ? db
+          .prepare<[string, string], { id: string }>(
+            "SELECT id FROM projects WHERE uid = ? AND id != ?"
+          )
+          .get(uid, existing.id)
+      : undefined;
+    if (shouldAdoptUid && !conflict) {
+      db.prepare(
+        `UPDATE projects
+         SET uid = ?, kind = COALESCE(?, kind), last_seen_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      ).run(uid, kind, existing.id);
+    } else {
+      db.prepare(
+        "UPDATE projects SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?"
+      ).run(existing.id);
+    }
+    const refreshed = db
+      .prepare<[string], Project>(
+        "SELECT id, uid, name, git_remote, root_path, kind, created_at, last_seen_at FROM projects WHERE id = ?"
+      )
+      .get(existing.id);
+    return refreshed ?? existing;
+  }
+
+  const byUid = db
+    .prepare<[string], Project>(
+      "SELECT id, uid, name, git_remote, root_path, kind, created_at, last_seen_at FROM projects WHERE uid = ?"
+    )
+    .get(uid);
+  if (byUid && byUid.root_path !== rootPath) {
+    // The same project seen at a new path: adopt it instead of duplicating.
+    db.prepare(
+      `UPDATE projects
+       SET root_path = ?, name = COALESCE(?, name), git_remote = COALESCE(?, git_remote),
+           kind = COALESCE(?, kind), last_seen_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(rootPath, options?.name ?? null, gitRemote, kind, byUid.id);
+    const adopted = db
+      .prepare<[string], Project>(
+        "SELECT id, uid, name, git_remote, root_path, kind, created_at, last_seen_at FROM projects WHERE id = ?"
+      )
+      .get(byUid.id);
+    return adopted ?? byUid;
   }
 
   const name = options?.name ?? (path.basename(rootPath) || "project");
-  const rawRemote = options?.gitRemote ?? tryGetGitRemote(rootPath) ?? null;
-  const gitRemote = rawRemote ? sanitizeGitRemote(rawRemote) : null;
   const id = crypto.randomUUID();
 
   db.prepare(
-    "INSERT INTO projects (id, name, git_remote, root_path) VALUES (?, ?, ?, ?)"
-  ).run(id, name, gitRemote, rootPath);
+    `INSERT INTO projects (id, uid, name, git_remote, git_remotes, kind, aliases, root_path, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+  ).run(id, uid, name, gitRemote, gitRemotesJson, kind, aliasesJson, rootPath);
 
   const created = db
     .prepare<[string], Project>(
@@ -431,5 +782,10 @@ export function ensureProject(
     throw new Error(`Failed to create project record for rootPath: ${rootPath}`);
   }
 
-  return created;
+  return {
+    ...created,
+    uid,
+    kind,
+    last_seen_at: new Date().toISOString(),
+  };
 }

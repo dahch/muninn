@@ -7,6 +7,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
+    // Portable storage writes to `MUNINN_HOME`; isolate it per test file.
+    setupFiles: ["test/setup.ts"],
     // Several suites build real TypeScript programs and git repositories; under a
     // loaded CI runner the default 5 s budget made healthy tests flaky.
     testTimeout: 20_000,
