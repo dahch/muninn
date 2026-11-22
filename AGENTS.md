@@ -46,7 +46,7 @@ Vitest default; the repository config sets a 20-second timeout.
   the portable MCP configuration installer/diagnostic (`portable.ts`), and the marked agent rules
   writer/diagnostic (`rules-target.ts`), including legacy Huginn-block detection and replacement.
 - `src/contracts/` — in-process TypeScript contract verification.
-- `src/util/` — terminal sanitization and path safety.
+- `src/util/` — terminal sanitization, path safety and grammatical count labels (`plural.ts`).
 
 Read [`DESIGN.md`](./DESIGN.md) before changing the storage schema, service transactions, MCP tool
 contract, indexer, or setup writer. Read [`SPEC.md`](./SPEC.md) for product behavior and [`plan.md`](./plan.md)

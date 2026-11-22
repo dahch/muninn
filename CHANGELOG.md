@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Five-minute adoption path.** The README now opens with a Quick Start that goes from
+  `muninn memory init` to a second session reading the first session's handoff, using a concrete
+  "remember an architecture decision between sessions" scenario. It ships with
+  `docs/media/muninn-demo.gif`, a terminal recording generated from real CLI output by
+  `docs/media/render_demo.py`, so it can be regenerated whenever user-facing output changes.
+
+### Changed
+
+- **The README leads with the differentiator**: local, deterministic memory and a code graph over
+  one SQLite file — no embeddings, no network, no server.
+- **Extraction fidelity is now documented.** A per-tier table and a practical "in practice"
+  section explain what the heuristic fallback extracts in Python, Rust, Go and other languages
+  (declaration-line spans, name-only call resolution, no Python docstrings), when to install the
+  optional tree-sitter pack, and why every edge keeps its `heuristic` confidence. `DESIGN.md`
+  records the implementation contract behind that table.
+- **CLI summaries use grammatical counts** (`1 file, 1 symbol, 1 edge` instead of
+  `1 file(s), 1 symbols, 1 edges`) across `index`, `memory index`, `seed` and `end-session`.
+  A shared `src/util/plural.ts` helper keeps them consistent.
+
 ## 0.4.0
 
 ### Added

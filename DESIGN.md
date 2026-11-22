@@ -1334,6 +1334,28 @@ identity, before decisions, so budget truncation protects continuity first.
    callers/callees, bounded impact BFS, implementations, file imports, import cycles, affected
    tests, file tree, and `buildExplore`, which assembles a budgeted Markdown answer.
 
+**Extraction fidelity and the heuristic fallback.** Tier C exists so that an install without the
+optional pack still produces a useful graph, and its limits are deliberate rather than accidental:
+
+- A symbol is a line match from a per-language pattern table, so its span is the declaration line
+  (`startLine === endLine`), its signature is the trimmed line, and its doc comes from the
+  preceding comment block. Python docstrings below a `def` are therefore not captured.
+- Imports use a shared pattern list plus `resolveHeuristicImport`, which resolves Python absolute
+  and relative module paths and Ruby `require_relative`; other specifiers keep the raw name, and the
+  resolution pass marks them `external` unless a file matches.
+- Calls match `\b<identifier>\s*\(` on lines that do not declare a symbol, skip a keyword denylist
+  (`if`, `for`, `return`, common print/definition keywords), and are attributed to the last
+  declaration at a shallower indentation. Resolution is name-only: same file first, then a
+  project-unique name; duplicates become `ambiguous` and unknown names `unresolved`.
+- Work is bounded at 4,000 symbols and 4,000 edges per file, and the scan is deterministic
+  (identical bytes produce identical rows).
+- Every fallback edge keeps `confidence: "heuristic"`; consumers must not present it as a verified
+  call graph. Tier B keeps AST spans and definitions but still resolves calls by name, so the same
+  caution applies to call edges there.
+
+The README carries the user-facing expectation table ("How precise is each extraction tier?"); this
+section is the contract a contributor implements and tests.
+
 ### 8.5 MCP surface
 
 `muninn_explore` returns Markdown directly (like `muninn_bootstrap`); `muninn_graph` and

@@ -1,6 +1,7 @@
 # Muninn
 
-Persistent **project memory and code graph** for AI coding agents.
+**Local, deterministic memory and a code graph for AI coding agents — one SQLite file, no
+embeddings, no network, no server.**
 
 Muninn stores what a coding session learns — architectural decisions, conventions, discoveries,
 bugfixes, and the handoff that says where the work stopped — in a portable SQLite store keyed by
@@ -12,8 +13,104 @@ Node/Bun library and a CLI.
 Moving between agents, starting a new session or cloning the project does not lose context: the
 next session calls `muninn_bootstrap` and starts from the decisions and the handoff.
 
+![Session 1 writes a handoff; session 2, in another agent, opens with it and the active decisions](docs/media/muninn-demo.gif)
+
+*Recorded from the real CLI (absolute paths shortened): session 1 closes with `muninn end-session`;
+session 2, in a different agent, calls the brief and reads the handoff and the active decision. No
+database server, no embedding API, no network call.*
+
 It used to live inside [Huginn](https://github.com/dahch/huginn); it is now an independent
 package with no dependency on the orchestrator.
+
+## Quick Start in 5 minutes
+
+**Goal:** make Cursor — or any MCP-capable agent — remember an architecture decision between
+sessions, and start the next session knowing the exact next step.
+
+**You need:** Node.js 20+ (or Bun) and a project. The examples call it `my-app`; use yours.
+
+### 1. Install and create the project identity (1 min)
+
+```sh
+npm install -g @dahch/muninn
+cd ~/code/my-app
+muninn memory init --project .
+```
+
+```text
+✔ Muninn memory database initialized
+  Database: ~/.muninn/projects/p-1f3c9a7e0b2d4c6a8e0f/memory.db
+  Project:  my-app (/home/you/code/my-app)
+  UID:      p-1f3c9a7e0b2d4c6a8e0f
+  Marker:   /home/you/code/my-app/.muninn/project.json
+  Status:   Tables ready
+```
+
+Commit `.muninn/project.json`. It is the uid that keeps memory attached if the repository moves,
+is cloned or is checked out on another machine; the database itself stays outside the checkout.
+
+### 2. Register Muninn with your agent (1 min)
+
+```sh
+muninn setup --agent cursor --project "$PWD"
+```
+
+Swap `cursor` for `claude`, `codex`, `opencode`, `dsh` or any other id from `muninn setup --list`.
+Setup merges only the `muninn` entry, leaves the rest of the configuration untouched and installs
+a marked rules block in the agent's rules file. Restart the agent so it loads the MCP server.
+
+### 3. Settle a decision (1 min)
+
+In the agent, ask for something concrete:
+
+> Use SQLite with WAL for the counters and remember why.
+
+The agent calls `muninn_save` with category `decision` and a topic key such as `storage`; saving
+another decision with the same topic key supersedes the old one atomically. The rules block that
+`setup` installed is what tells the agent to save here instead of losing the reasoning in chat.
+
+### 4. Close the session (1 min)
+
+When the work stops, ask:
+
+> Write the handoff: what you did, what remains and the next step.
+
+or write it from the terminal, where `end-session` can also fill branch and changed files from Git:
+
+```sh
+muninn end-session \
+  --goal "Counters on SQLite" \
+  --state "WAL enabled; migration pending" \
+  --next "write migration;add tests"
+```
+
+### 5. Start the next session anywhere (1 min)
+
+In a new session — the same agent or a different one — the agent calls `muninn_bootstrap`, which
+is what the rules block asks for. The handoff is rendered before decisions, so budget truncation
+cannot hide the point where the work stopped:
+
+```text
+# Session Brief: my-app
+
+## Where we left off
+- Goal: Counters on SQLite
+- State: WAL enabled; migration pending
+
+### Next steps
+1. write migration
+2. add tests
+
+## Active Decisions
+
+### Topic: storage
+- **Use SQLite with WAL for counters** `[decision]`
+  ...
+```
+
+No MCP in that runtime? `muninn memory brief` prints the same Markdown. That is the whole loop:
+save a decision, write a handoff, read the brief. Seeding, the code graph and the optional
+tree-sitter pack sit on top of the same store and never change this contract.
 
 ## Why Muninn
 
@@ -83,9 +180,10 @@ package with no dependency on the orchestrator.
 - A C/C++ toolchain for `better-sqlite3`'s native module when a prebuilt binary is unavailable
 - Git only if you want repository discovery and sanitized remote metadata; Muninn works outside a repository
 - Optional: `web-tree-sitter` and `@vscode/tree-sitter-wasm` (installed as optional dependencies) for
-  AST-precise extraction of non-TypeScript languages; without them the heuristic engine is used
+  AST-precise extraction of non-TypeScript languages; without them the
+  [heuristic engine](#how-precise-is-each-extraction-tier) is used
 
-## Getting Started
+## Installation
 
 ```sh
 npm install -g @dahch/muninn     # CLI + MCP server
@@ -93,7 +191,8 @@ npm install -g @dahch/muninn     # CLI + MCP server
 npm install @dahch/muninn
 ```
 
-From a checkout, install the locked dependencies and initialize memory for this repository:
+The [Quick Start](#quick-start-in-5-minutes) covers a global install end to end. From a checkout,
+install the locked dependencies, build and initialize memory for this repository:
 
 ```sh
 npm ci
@@ -304,6 +403,47 @@ per-agent format is assumed. For Claude Code, `muninn hooks install` merges thos
 missing entry, legacy `huginn` command, a pinned `--project`, or a runtime without MCP support
 (DSH Desktop reports this until an MCP plugin is installed in its profile).
 
+### How precise is each extraction tier?
+
+The graph never hides its fidelity: every symbol records its line span and every edge carries
+`confidence` (`exact` or `heuristic`) and `resolution` (`resolved`, `ambiguous`, `external`,
+`unresolved`). Three engines produce those rows:
+
+| What you get | TS/JS (Compiler API) | Optional tree-sitter pack | Heuristic fallback |
+|---|---|---|---|
+| Symbols | declarations with body spans, kinds, heritage | declarations with body spans, kinds, heritage | name, kind and signature from per-language line patterns |
+| Symbol span | `startLine`–`endLine` cover the body | cover the body | the declaration line only |
+| Nesting (`Class.method`) | exact | exact | class association where the family allows it; Python methods are plain functions |
+| Imports | AST specifiers, resolved to files where the resolution pass can | AST specifiers, same resolution pass | common `import` / `from` / `use` / `require` / `#include` forms; Python and Ruby relative imports resolve to files |
+| Calls | call sites with the local declaration in scope | call expressions | any `name(` token outside a declaration line, attributed to the last shallower declaration |
+| Call target | same file, then project-unique name; else `ambiguous`/`unresolved` | same | same; duplicate names become `ambiguous`, unknown names stay `unresolved` |
+| Docstrings / doc comments | JSDoc where present | comments where present | preceding `#` / `//` / `--` comment lines (Python docstrings are not read) |
+
+In practice:
+
+- **Symbols and imports** are dependable for straightforward module/class code. A Python file
+  with `class CounterService`, three `def`s and `from app.store import CounterStore` yields the
+  class, the functions and one resolved import; `.config` stays `external` when no file matches.
+- **Calls are a recall-oriented hint, not a verified call graph.** Member calls
+  (`self.store.get(name)`) are attributed by the bare name, so a same-named symbol elsewhere can
+  be selected, and chained, computed or aliased calls can be missed. Treat `calls` edges from the
+  fallback as "this name appears in the body", then confirm with `muninn_explore`.
+- **Spans stop at the declaration line**, so a fallback symbol's source slice shows the signature,
+  not the body. Nesting and visibility are best effort.
+
+If exact bodies, call receivers and docstrings matter for Python, Rust, Go or another supported
+language (Python, Go, Rust, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift, Dart, Scala, Lua, Bash,
+SQL, Vue/Svelte/Astro), add the local pack — still no network at runtime:
+
+```sh
+npm install --save-optional web-tree-sitter @vscode/tree-sitter-wasm
+muninn index --full
+```
+
+Without the pack nothing breaks: the fallback is deterministic (the same bytes always produce the
+same rows), bounded at 4,000 symbols and 4,000 edges per file, and its rows are labelled
+`heuristic` so you can judge an edge before trusting it.
+
 ## Architecture
 
 Muninn is one `MemoryService` core with three adapters: the CLI, the MCP stdio server, and the
@@ -499,6 +639,8 @@ test/                    Vitest integration suites for db, service, session brie
 - [`plan.md`](./plan.md) — staged plan for the agent-setup work.
 - [`ROADMAP.md`](./ROADMAP.md) — the portable-memory and code-graph roadmap with completion state.
 - [`AGENTS.md`](./AGENTS.md) — repository conventions for coding agents; no `.opencode/agents/` are defined.
+- [`docs/media/README.md`](./docs/media/README.md) — how the animated README demo is recorded and
+  regenerated from real CLI output.
 
 ## Contributing
 
