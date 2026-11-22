@@ -18,6 +18,14 @@ import { fileURLToPath } from "node:url";
 import { handleMcpCommand, handleMemoryCommand } from "./commands/memory.js";
 import { handleCheckCommand } from "./commands/check.js";
 import { handleSetupCommand } from "./commands/setup.js";
+import { handleMigrateCommand, handleProjectCommand } from "./commands/project.js";
+import { handleEndSessionCommand, handleHandoffCommand } from "./commands/handoff.js";
+import { handleSeedCommand } from "./commands/seed.js";
+import { handleGraphCommand, handleIndexCommand } from "./commands/graph.js";
+import { handleDoctorCommand } from "./commands/doctor.js";
+import { handleRestoreCommand, handleSnapshotCommand } from "./commands/snapshot.js";
+import { handleHookCommand } from "./commands/hook.js";
+import { handleHooksCommand } from "./commands/hooks.js";
 
 export const VERSION = "0.2.1";
 
@@ -40,6 +48,13 @@ const BOOLEAN_FLAGS = new Set([
   "--version",
   "--import",
   "--json",
+  "--no-marker",
+  "--purge",
+  "--close",
+  "--full",
+  "--global",
+  "--watch",
+  "--no-treesitter",
   "--quiet",
   "--force",
   "--dry-run",
@@ -93,25 +108,54 @@ export function usage(): string {
   return `muninn — persistent semantic and symbol memory for coding agents.
 
 Usage:
-  muninn memory init [--db <path>] [--project <path>]
+  muninn memory init [--db <path>] [--project <path>] [--no-marker]
   muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>]
   muninn memory sync [--import] [--file <path>] [--project <path>]
   muninn memory index [files...] [--project <path>] [--db <path>]
   muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
+  muninn memory handoff [status|--goal <t> --state <s>|--close]
+  muninn seed [--project <path>] [--dry-run] [--json]
+  muninn index [--project <path>] [--full] [--watch] [--json] [--max-files <n>] [--no-treesitter]
+  muninn graph <relation> <symbol|file> [--depth <n>] [--limit <n>] [--json]
+  muninn doctor [--project <path>] [--json]
+  muninn snapshot [--project <path>] [--file <path>]
+  muninn restore [--project <path>] [--file <path>]
+  muninn hook <session-start|session-end> [--project <path>] [--budget <n>]
+  muninn hooks <status|install|uninstall> [--home <path>] [--dry-run] [--force]
+  muninn end-session [--goal <t>] [--state <s>] [--next "a;b"] [--question "x;y"]
+  muninn project resolve [path] [--json]
+  muninn project list [--json]
+  muninn project register [path]
+  muninn project rename <name> [--project <path>]
+  muninn project forget <uid|path> [--purge --force]
+  muninn migrate [--from <db>] [--scan <dir>] [--dry-run] [--json]
   muninn check [files...] [--project <path>]
   muninn mcp run [--db <path>] [--project <path>]
   muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>]
                [--portable|--no-portable] [--no-rules] [--force] [--dry-run] [--status]
 
 Commands:
-  memory  query and manage the persistent codebase memory (init, search, sync, index, brief)
-  mcp     start the Muninn MCP server for agent memory integration (run)
-  check   verify TypeScript execution contracts and pre-emit diagnostics
-  setup   list, install, and diagnose Muninn agent and portable MCP configurations
+  memory   query and manage the persistent codebase memory (init, search, sync, index, brief, handoff)
+  seed     bootstrap memory from README, ADRs, manifests and the directory tree
+  index    build or refresh the incremental code graph
+  graph    query the code graph (search, node, callers, callees, impact, cycles, tests)
+  doctor   diagnose the project, memory, code graph and every agent configuration
+  snapshot write a portable memory snapshot into <project>/.muninn/memory.jsonl
+  restore  merge a snapshot back, idempotently by observation id
+  hook     agent-agnostic session-start / session-end hooks
+  hooks    install or remove Claude Code session hooks (opt-in)
+  end-session  close a session with a handoff (branch, changed files, next steps)
+  project  resolve and manage portable project identity (resolve, list, register, rename, forget)
+  migrate  move legacy .huginn memory into portable per-project storage
+  mcp      start the Muninn MCP server for agent memory integration (run)
+  check    verify TypeScript execution contracts and pre-emit diagnostics
+  setup    list, install, and diagnose Muninn agent and portable MCP configurations
 
 Storage:
-  The database resolves to <git-root>/.huginn/muninn.db inside a repository and
-  to ~/.huginn/muninn.db outside one. --db overrides it (":memory:" is accepted).
+  Identity lives in <project>/.muninn/project.json (commit it). Memory lives in
+  $MUNINN_HOME/projects/<uid>/memory.db (default ~/.muninn), one file per project,
+  whether or not the project is a Git repository. --db overrides it (":memory:"
+  is accepted). MUNINN_LEGACY_STORAGE=1 restores the pre-0.3 layout.
 `;
 }
 
@@ -181,6 +225,93 @@ export async function main(argv: string[]): Promise<void> {
 
   if (command === "setup") {
     await handleSetupCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "project") {
+    const positionals = (args._positionals as string[] | undefined) ?? [];
+    const subcommand =
+      typeof positionals[0] === "string"
+        ? positionals[0]
+        : typeof args._positional === "string"
+          ? args._positional
+          : undefined;
+    await handleProjectCommand(
+      subcommand,
+      args as Record<string, string | boolean | undefined>,
+      positionals.slice(1),
+    );
+    return;
+  }
+
+  if (command === "migrate") {
+    await handleMigrateCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "seed") {
+    await handleSeedCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "end-session") {
+    await handleEndSessionCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "index") {
+    await handleIndexCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "graph") {
+    const positionals = (args._positionals as string[] | undefined) ?? [];
+    await handleGraphCommand(positionals, args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "doctor") {
+    await handleDoctorCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "snapshot") {
+    await handleSnapshotCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "restore") {
+    await handleRestoreCommand(args as Record<string, string | boolean | undefined>);
+    return;
+  }
+
+  if (command === "hook") {
+    const positionals = (args._positionals as string[] | undefined) ?? [];
+    const subcommand =
+      typeof positionals[0] === "string"
+        ? positionals[0]
+        : typeof args._positional === "string"
+          ? args._positional
+          : undefined;
+    await handleHookCommand(
+      subcommand,
+      args as Record<string, string | boolean | undefined>
+    );
+    return;
+  }
+
+  if (command === "hooks") {
+    const positionals = (args._positionals as string[] | undefined) ?? [];
+    const subcommand =
+      typeof positionals[0] === "string"
+        ? positionals[0]
+        : typeof args._positional === "string"
+          ? args._positional
+          : undefined;
+    await handleHooksCommand(
+      subcommand,
+      args as Record<string, string | boolean | undefined>
+    );
     return;
   }
 

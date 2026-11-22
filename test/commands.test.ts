@@ -12,6 +12,11 @@ import { main, parseArgs, usage, VERSION } from "../src/cli.js";
 import { MemoryService } from "../src/service/memory-service.js";
 import { getDatabase } from "../src/db/client.js";
 import * as mcpServerModule from "../src/mcp/server.js";
+import {
+  deriveProjectUid,
+  memoryJsonlPath,
+  resolveProjectContext,
+} from "../src/project/identity.js";
 
 describe("Muninn CLI Commands & Integration", () => {
   let tempDir: string;
@@ -646,7 +651,9 @@ describe("Muninn CLI Commands & Integration", () => {
     });
 
     it("syncs to default path when positionals is empty", async () => {
-      const defaultPath = path.join(tempDir, ".huginn", "memories.jsonl");
+      const defaultPath = memoryJsonlPath(
+        resolveProjectContext({ explicitRoot: tempDir }).uid
+      );
       await handleMemoryCommand(
         "sync",
         { "--db": dbPath, "--project": tempDir },
@@ -659,7 +666,9 @@ describe("Muninn CLI Commands & Integration", () => {
     });
 
     it("syncs to default path when args._positional is 'sync'", async () => {
-      const defaultPath = path.join(tempDir, ".huginn", "memories.jsonl");
+      const defaultPath = memoryJsonlPath(
+        resolveProjectContext({ explicitRoot: tempDir }).uid
+      );
       if (fs.existsSync(defaultPath)) {
         fs.unlinkSync(defaultPath);
       }
@@ -687,9 +696,8 @@ describe("Muninn CLI Commands & Integration", () => {
       expect(logOutput).toContain(`Synced 2 memories to ${rootSyncFile}.`);
     });
 
-    it("falls back to findGitRoot when currentProject.root_path is empty", async () => {
+    it("uses portable storage when currentProject.root_path is empty", async () => {
       const dbClientModule = await import("../src/db/client.js");
-      const gitRootSpy = vi.spyOn(dbClientModule, "findGitRoot").mockReturnValue(tempDir);
       const ensureSpy = vi.spyOn(dbClientModule, "ensureProject").mockReturnValue({
         id: "test-id",
         name: "test-project",
@@ -703,10 +711,13 @@ describe("Muninn CLI Commands & Integration", () => {
           "--db": dbPath,
         });
 
-        const defaultPath = path.join(tempDir, ".huginn", "memories.jsonl");
-        expect(fs.existsSync(defaultPath)).toBe(true);
+        // The snapshot no longer depends on the project row: it is keyed by the
+        // uid derived from the process context.
+        const expected = memoryJsonlPath(
+          deriveProjectUid({ gitRemote: null, rootPath: process.cwd() })
+        );
+        expect(fs.existsSync(expected)).toBe(true);
       } finally {
-        gitRootSpy.mockRestore();
         ensureSpy.mockRestore();
       }
     });
