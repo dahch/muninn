@@ -1,5 +1,9 @@
 # Plan: Muninn Agent Setup
 
+> **Status: delivered in 0.2.0.** All four iterations below are complete and their acceptance
+> criteria are checked; the setup subsystem they describe is documented in `README.md`, `DESIGN.md`
+> §7 and ADR-12 to ADR-18. The file is kept as the implementation record.
+
 ## Iteration 1 — Install and diagnose the portable MCP configuration
 modules: src/setup/, src/commands/, src/cli.ts, test/
 

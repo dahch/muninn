@@ -5,10 +5,16 @@ This is the design of the memory engine extracted from the orchestrator's `DESIG
 `src/mcp/`, `src/contracts/` and `src/commands/`, with the tests under `test/`.
 
 Muninn is now an independent package: the `muninn` CLI, the MCP server, and the library all live in
-this repository. Two conventions carried over unchanged: the database lives at
-`<git-root>/.huginn/muninn.db`, and the MCP server is the integration surface agents use. Huginn can
-still embed the package, but no orchestrator code is required to build, test, or run Muninn; there are
-no `huginn memory`, `huginn check`, or `huginn mcp run` wrappers in this repository.
+this repository. The MCP server is the integration surface agents use. Huginn can still embed the
+package, but no orchestrator code is required to build, test, or run Muninn; there are no
+`huginn memory`, `huginn check`, or `huginn mcp run` wrappers in this repository.
+
+> **Reading guide (0.3).** Sections 1–7 document the engine as it stood in 0.2 and remain accurate for
+> the memory, MCP, CLI, contract and setup surfaces. Section 8 is authoritative wherever 0.3 changed
+> behaviour: portable identity and storage (memory now lives in
+> `$MUNINN_HOME/projects/<uid>/`), the handoff record, the multi-language code graph, global memory,
+> snapshots, hooks and watch mode. The few passages in §1, §2 and §6 that still describe the legacy
+> `.huginn` layout are marked inline.
 
 ## 1. Muninn Memory Engine — Database Layer & SQLite FTS5 Schema
 
@@ -16,21 +22,24 @@ The `src/db/` package provides embedded, local-first persistence for project mem
 
 ### Path Resolution Architecture
 
-`resolveDatabasePath(customPath?, startDir?)` determines the SQLite database location based on repository context:
+`resolveDatabasePath(customPath?, startDir?)` determines the SQLite database location from the
+portable project identity (ADR-19, ADR-20; details in §8.1):
 
 ```mermaid
 flowchart TD
     A["resolveDatabasePath(customPath, startDir)"] --> B{"customPath provided and non-empty?"}
     B -- Yes --> C["Return customPath (:memory: or explicit file)"]
-    B -- No --> D["findGitRoot(startDir)"]
-    D -- Git repository found --> E["Return <git_root>/.huginn/muninn.db"]
-    D -- Not inside git repo --> F["Return ~/.huginn/muninn.db"]
+    B -- No --> D["resolveProjectContext(startDir)"]
+    D --> E["Return $MUNINN_HOME/projects/<uid>/memory.db"]
+    D -. "MUNINN_LEGACY_STORAGE=1" .-> F["Legacy: <git_root>/.huginn/muninn.db or ~/.huginn/muninn.db"]
 ```
 
 - When `customPath` is passed and not empty (`""`), it is returned directly (enabling `:memory:` for isolated unit tests or explicit file paths).
-- `findGitRoot(startDir)` searches upward through parent directories until it encounters a `.git` folder or file.
-- If a git root is discovered, the database path resolves to `<git_root>/.huginn/muninn.db`.
-- If no git repository is present, it falls back to the user's home profile at `~/.huginn/muninn.db`.
+- `resolveProjectContext(startDir)` resolves the committed `.muninn/project.json` marker, then the Git
+  common root, then the registry, then the path itself into a stable uid.
+- Memory and the JSONL snapshot live under `$MUNINN_HOME/projects/<uid>/` (default `~/.muninn`), so a
+  move, a clone, a worktree or another machine keeps the same memory.
+- `MUNINN_LEGACY_STORAGE=1` restores the pre-0.3 `.huginn` resolution for migration work only.
 - If the resolved path is not `:memory:`, `getDatabase` ensures the target directory exists by calling `fs.mkdirSync(dir, { recursive: true, mode: 0o700 })`, restricting filesystem permissions to the owner.
 
 #### One root for the database and the project record (ADR-9 / REQ-3)
@@ -40,23 +49,22 @@ The database **file** and the project **row** used to be resolved independently 
 working directory inside `Y` labelled a row in **Y's** database. Both now come from one root:
 
 - **`getDatabase(dbPath?, startDir?)`** forwards `startDir` to `resolveDatabasePath(dbPath, startDir)`.
-  `MemoryService` passes `options.projectRoot`, so the file lives at `<project>/.huginn/muninn.db`
-  regardless of the process's cwd.
+  `MemoryService` passes `options.projectRoot`, so the file lives at
+  `$MUNINN_HOME/projects/<uid>/memory.db` regardless of the process's cwd.
 - **`ensureProject(db, options?)`** takes the same `startDir` for its fallback: with no explicit
   `rootPath` it resolves `findGitRoot(resolve(startDir)) ?? resolve(startDir)` instead of an independent
   `findGitRoot()` of the cwd — so a caller cannot pick two different roots for the two halves.
 - **Screened writes**: before opening, `getDatabase` runs the resolved path through the shared
-  `assertDocPath` (`projectPath` = the git root of `startDir`, label `"the Muninn database"`,
-  `action: "write"`). The screen refuses a symlinked final component always and demands that a
-  project-relative path resolve inside the project, so a cloned repository shipping `.huginn/`
-  — or `muninn.db` itself — as a symlink (or a symlinked parent) cannot redirect the SQLite write
-  outside the project (SEC-005). `MemoryService.assertMemoryPath`
+  `assertDocPath` (`projectPath` = `$MUNINN_HOME` for the portable store, label
+  `"the Muninn database"`, `action: "write"`). The screen always refuses a symlinked final
+  component, so a cloned repository or a shared machine cannot redirect the SQLite write through a
+  link (SEC-005). Because the database now lives outside the project, the containment root moved from
+  the project to `$MUNINN_HOME` (ADR-20). `MemoryService.assertMemoryPath`
   applies the same screen to the durable JSONL export in **both** directions (`syncToDisk` writes,
   `importFromDisk` reads), because a readable foreign `memories.jsonl` would be served to the agent
   through the MCP memory tools (SEC-006).
-- **Diagnosis, not repair**: This package has no doctor command. Attribution diagnostics belong to
-  an embedding orchestrator and are not part of the Muninn CLI; Muninn itself never rewrites an
-  existing `projects.root_path`.
+- **Diagnosis, not repair**: `muninn doctor` reports the resolved project, memory, graph and every
+  known agent configuration read-only (§8.6); it never rewrites an existing project record.
 
 ### SQLite Connection & PRAGMA Configuration
 
@@ -231,7 +239,7 @@ flowchart TD
     subgraph Storage["Persistence Layer (src/db/)"]
         DB[("better-sqlite3 (WAL Mode)")]
         FTS[("observations_fts (FTS5)")]
-        Disk[(".huginn/memories.jsonl (0o600)")]
+        Disk[("$MUNINN_HOME/projects/<uid>/memories.jsonl (0o600)")]
     end
 
     Consumers --> MS
@@ -332,7 +340,7 @@ Returns aggregate system metrics:
 
 Exports observations and linked entities to a portable JSON Lines (`.jsonl`) file:
 
-- **Path Resolution**: Defaults to `<project_root>/.huginn/memories.jsonl`. Relative paths resolve against `currentProject.root_path` (with fallback to git root or `process.cwd()`).
+- **Path Resolution**: Defaults to `$MUNINN_HOME/projects/<uid>/memories.jsonl`. Relative paths resolve against the resolved project root (with fallback to `process.cwd()`).
 - **Atomic File Writing**:
   - Content is formatted as newline-delimited JSON (`.jsonl`).
   - Writes to a temporary file `<resolvedPath>.tmp` with mode `0o600` (`rw-------`).
@@ -345,7 +353,7 @@ Exports observations and linked entities to a portable JSON Lines (`.jsonl`) fil
 
 Idempotently imports observations and entities from `.jsonl` files into the database:
 
-- **Path Resolution**: Defaults to `<project_root>/.huginn/memories.jsonl` (or custom path).
+- **Path Resolution**: Defaults to `$MUNINN_HOME/projects/<uid>/memories.jsonl` (or custom path).
 - **Line-by-Line Streaming**: Parses each JSON line independently; malformed lines or non-object entries are skipped without aborting valid lines.
 - **Type Integrity**: Strictly verifies that `id`, `title`, and `content` are non-empty strings.
 - **Idempotency**: Checks `SELECT id FROM observations WHERE id = ?`. If an observation with the given UUID already exists, it is counted as `skipped` and not re-inserted.
@@ -562,6 +570,11 @@ The exported `MUNINN_TOOLS: Tool[]` array is dynamically generated from `TOOL_RE
 | `muninn_stats` | `MuninnStatsSchema` | - `allProjects`: Optional boolean (default: false) | `service.getStats(allProjects ? undefined : currentProject.id)` |
 | `muninn_inspect_symbol` | `MuninnInspectSymbolSchema` | - `symbol`: Trimmed string, 1–2,000 chars<br>- `projectId` / `project_id`: Optional trimmed string | `service.inspectSymbol(symbol, projectId)` returning symbol definition, file location, incoming/outgoing dependencies, a bounded depth-1 neighbor traversal, and linked observations |
 | `muninn_bootstrap` | `MuninnBootstrapSchema` | - `paths`: Optional array of 1–20 trimmed path strings (max 4,096 chars each)<br>- `budgetChars` / `budget_chars`: Optional positive integer, max 20,000, default 8,000<br>- `expandGraph` / `expand_graph`: Optional boolean, default `true` | Read-only `readSessionBrief` (default server) or `service.getSessionBrief` (injected service); returns the shared Markdown directly rather than JSON |
+| `muninn_handoff` | `MuninnHandoffSchema` | `action`: `checkpoint` | `end` | `status` | `close`; goal and state validated when writing | `service.saveHandoff` / `getActiveHandoff`; renders the continuity record (§8.3) |
+| `muninn_project` | `MuninnProjectSchema` | `action`: `status` | `list` | `use` | `index`; optional `path`, `full` | Server-level handler: `use` pins the project and reopens the service, `index` refreshes the graph (§8.5) |
+| `muninn_explore` | `MuninnExploreSchema` | `question`, optional `paths`, `budget`, `limit` | `buildExplore`: budgeted Markdown with source, callers, callees and related decisions (ADR-23) |
+| `muninn_graph` | `MuninnGraphSchema` | `query`: node | callers | callees | impact | implementations | imports | cycles | tests | files; `target`, `depth`, `limit` | Bounded graph queries over the `code_*` tables |
+| `muninn_code_search` | `MuninnCodeSearchSchema` | `query`, optional `language`, `kind`, `limit` | FTS5 symbol search |
 | `muninn_verify_contract` | `MuninnVerifyContractSchema` | - `files`: Optional array of strings or single string (transformed to array), max 500 items, 1–1,000 chars per path<br>- `projectRoot` / `project_root`: Optional trimmed string (enforced inside permitted project root) | `verifyTypeScriptContracts(targetRoot, files)` returning `{ valid, errorsCount, diagnostics }` with line/column locations and visual code snippets |
 
 #### Symbol Schema Refinement (`SymbolSchema`)
@@ -616,7 +629,10 @@ The CLI interface for Muninn memory (`src/commands/memory.ts`) connects human de
 
 ### Command Routing & CLI Parsing Architecture
 
-CLI routing in `src/cli.ts` dispatches top-level commands to their respective subsystems:
+CLI routing in `src/cli.ts` dispatches top-level commands to their respective subsystems. The
+0.3 commands (`seed`, `index`, `graph`, `project`, `migrate`, `handoff`, `end-session`, `doctor`,
+`snapshot`, `restore`, `hook`, `hooks`) live in their own modules under `src/commands/` and follow the
+same pattern; `muninn --help` prints the authoritative list.
 
 ```mermaid
 flowchart TD
@@ -625,6 +641,10 @@ flowchart TD
     DISPATCH -- "mcp" --> MCP["handleMcpCommand(subcommand, args)"]
     DISPATCH -- "check" --> CHK["handleCheckCommand(files, args)"]
     DISPATCH -- "setup" --> SETUP["handleSetupCommand(args)"]
+    DISPATCH -- "index / graph / seed" --> GRAPH["graph.ts / seed.ts"]
+    DISPATCH -- "project / migrate" --> PROJ["project.ts"]
+    DISPATCH -- "handoff / end-session" --> HO["handoff.ts"]
+    DISPATCH -- "doctor / snapshot / restore / hook(s)" --> AUX["doctor.ts / snapshot.ts / hook.ts / hooks.ts"]
 
     MEM --> SUBCMD{"subcommand"}
     SUBCMD -- "init" --> INIT["new MemoryService / ensureProject"]
@@ -654,9 +674,10 @@ flowchart TD
 2. **Boolean Flag Protection (`BOOLEAN_FLAGS`)**:
    - A dedicated `Set` flags boolean parameters: `-h`, `--help`, `-v`, `--version`, `--import`,
      `--json`, `--quiet`, `--force`, `--dry-run`, `--status`, `--portable`, `--no-portable`,
-     `--no-rules`, and `--list`.
+     `--no-rules`, `--list`, `--no-marker`, `--purge`, `--close`, `--full`, `--global`, `--watch`
+     and `--no-treesitter`.
    - For any flag in `BOOLEAN_FLAGS`, the parser assigns `true` immediately without consuming the next token, preventing flags like `--import` from consuming subsequent positional file paths. Flags outside the set (`--db`, `--project`, `--home`, `--agent`, etc.) consume the next non-flag token as their value.
-   - `--json` and `--quiet` are parsed but have no behavior yet. `--list`, `--agent`, `--project`, `--portable`, `--no-portable`, `--no-rules`, `--status`, and `--dry-run` are handled by `handleSetupCommand`.
+   - `--json` is honored by `seed`, `index`, `graph`, `project`, `migrate`, `doctor`, `hook` and `hooks`; `--quiet` is accepted by the parser but has no behavior yet. `--list`, `--agent`, `--project`, `--portable`, `--no-portable`, `--no-rules`, `--status`, and `--dry-run` are handled by `handleSetupCommand`.
 3. **Keyword Disambiguation & Anti-Shadowing**:
    - By partitioning command arguments through `_positionals`, user search queries matching subcommands (e.g. `muninn memory search search`) and filenames matching subcommands (e.g. `muninn memory sync sync`) are parsed without routing ambiguity or argument swallowing.
 4. **Numeric-Looking Values**:
@@ -673,7 +694,7 @@ flowchart TD
   - Outputs formatted green status badge and summary:
     ```
     ✔ Muninn memory database initialized
-      Database: /path/to/.huginn/muninn.db
+      Database: /path/to/.muninn/projects/<uid>/memory.db
       Project:  example-project (/path/to/project)
       Status:   Tables ready
     ```
@@ -695,9 +716,9 @@ flowchart TD
   - Guarantees database closure in `finally`.
 
 #### 3. `muninn memory sync [--import]`
-- **Purpose**: Exports observations to `.huginn/memories.jsonl` or imports them from an existing `.jsonl` file.
+- **Purpose**: Exports observations to the portable `memories.jsonl` or imports them from an existing `.jsonl` file.
 - **Workflow**:
-  - Resolves target path from `--file <path>` or positional argument; defaults to `<project_root>/.huginn/memories.jsonl`.
+  - Resolves target path from `--file <path>` or positional argument; defaults to `$MUNINN_HOME/projects/<uid>/memories.jsonl`.
   - **Export Mode** (default):
     - Invokes `service.syncToDisk(filePath)`.
     - Outputs `Synced N memories to <path>.`
@@ -958,7 +979,13 @@ export const TypeValidator = {
 
 ## 6. Topological AST Symbol & Dependency Indexer
 
-Codebase intelligence and semantic memory in Muninn are powered by the AST indexer in `src/indexer/ast-indexer.ts`. It parses TypeScript and JavaScript source files into an entity-relationship graph representing code symbols (functions, classes, interfaces, methods) and their structural dependencies (imports, extends, implements, references). The schema reserves `calls` as a relation type, but the current indexer does not emit call edges.
+> **Status in 0.3.** The indexer described in this section (`src/indexer/ast-indexer.ts`) still backs
+> the legacy `entities` / `entity_dependencies` tables and `muninn memory index`, for compatibility.
+> Current indexing goes through the code graph in `src/graph/`, which adds line spans, signatures,
+> call edges, confidence labels, multi-language extraction and pruning. See §8.4 and ADR-22/ADR-25;
+> where this section and §8.4 disagree, §8.4 is authoritative.
+
+Codebase intelligence and semantic memory in Muninn are powered by the AST indexer in `src/indexer/ast-indexer.ts`. It parses TypeScript and JavaScript source files into an entity-relationship graph representing code symbols (functions, classes, interfaces, methods) and their structural dependencies (imports, extends, implements, references). The legacy schema reserves `calls` as a relation type; the legacy indexer does not emit call edges, while the 0.3 graph indexer does.
 
 ### Architectural Motivation & Knowledge Graph Role
 
@@ -1103,7 +1130,8 @@ export interface SymbolInspection {
 
 ## 7. Agent Setup — Catalog, JSON/TOML Destinations, Rules, and Portable MCP Configuration
 
-`src/setup/registry.ts` holds the 13-destination catalog, path resolver, and explicit per-target
+`src/setup/registry.ts` holds the 14-destination catalog (13 writable formats plus the manual
+`dsh` destination), path resolver, and explicit per-target
 executable mapping used for `not installed` warnings (`null` for IDE/web targets such as `cursor` and
 `devin`, which are never probed); `src/setup/json-target.ts` shares JSON inspection, merging,
 and atomic writing for `mcpServers` and OpenCode `mcp` targets; `src/setup/toml-target.ts` provides a
@@ -1116,8 +1144,9 @@ reporting, and `src/cli.ts` routes `muninn setup`. The authoritative behavior is
 ### Catalog and path resolution
 
 The catalog IDs are `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`,
-`commandcode`, `omp`, `mcode`, and `mimo`, with the labels, formats, MCP path templates, and rules-file
-paths from the Huginn integrator reference. `{project}`, `{home}`, and `{opencodeConfigDir}` expand
+`commandcode`, `omp`, `mcode`, `mimo`, and `dsh`, with the labels, formats, MCP path templates, and rules-file
+paths from the Huginn integrator reference. `dsh` is `manual`: setup prints the `dsh-mcp` plugin steps
+instead of writing a file DSH does not have. `{project}`, `{home}`, and `{opencodeConfigDir}` expand
 with platform path APIs. `MUNINN_AGENT_<ID>_MCP_PATH` replaces a target's paths with a colon-separated
 list (empty segments ignored; an all-empty override is rejected), with
 `HUGINN_AGENT_<ID>_MCP_PATH` accepted as an equivalent fallback. Selection accepts one ID, `all`, or a
@@ -1250,3 +1279,98 @@ unknown top-level command. Normal setup and dry-run stop at the first fatal file
 successful writes; status continues through all applicable destinations and reports every error. Rules
 results use `written`/`present`/`stale`/`failed`, report the shared rules path and its selected agents,
 and never change the MCP outcome or exit code unless the rules operation itself fails.
+
+## 8. Portable Identity, Handoff Memory and the Code Graph (0.3)
+
+### 8.1 Resolution and storage
+
+`src/project/identity.ts` owns identity. Resolution order is: explicit root (normalised), nearest
+`.muninn/project.json`, Git **common** root (`git rev-parse --git-common-dir` semantics, implemented
+by parsing `.git` / `commondir` without spawning Git), a registry entry that owns the directory, then
+the directory itself. The uid is the marker uid, else the normalised Git remote, else the resolved
+path. `muninnHome()` resolves `MUNINN_HOME` or `~/.muninn`; memory is
+`projects/<uid>/memory.db` and the JSONL snapshot `projects/<uid>/memories.jsonl`. The registry is
+`registry.json`, merged atomically and never authoritative.
+
+`resolveDatabasePath` keeps its name but returns the portable path; `MUNINN_LEGACY_STORAGE=1`
+restores the old resolution for migration. `getDatabase` still screens the final path with
+`assertDocPath`; because the database now lives outside the project, only the symlink rule applies
+to it, which is the intended containment change (ADR-20).
+
+### 8.2 Schema v4 and migrations
+
+`PRAGMA user_version` tracks the schema (`SCHEMA_VERSION = 4`). `migrateDatabase` applies guarded,
+idempotent steps in one transaction: v2 adds the project identity columns and backfills uids; v3
+adds observation provenance (`scope`, `agent`, `session_id`, `tags`, `files`); v4's tables are
+created by `schema.sql` with `IF NOT EXISTS`, so older databases gain them on open. The handoffs
+table has its own FTS5 index and triggers.
+
+### 8.3 Handoffs
+
+`saveHandoff` validates goal and state, marks the project's active handoff `superseded` and inserts
+the new one in one transaction. `getActiveHandoff` is used by the brief; `saveHandoff({ closed: true })`
+and `closeHandoff` retire the record. The brief renders the handoff immediately after project
+identity, before decisions, so budget truncation protects continuity first.
+
+### 8.4 Code graph pipeline
+
+1. **Discovery** (`graph/languages.ts`): `git ls-files -co --exclude-standard` in a work tree,
+   otherwise a walker that skips default build directories and applies root `.gitignore` globs.
+2. **Change detection** (`graph/indexer.ts`): `code_files.mtime_ms` + `bytes` skip unchanged files
+   without reading them; content is hashed before parsing.
+3. **Extraction** (`graph/extractor.ts`, `graph/treesitter.ts`): Tier A uses `ts.createSourceFile`
+   with spans, imports, heritage and call sites; Tier B lazily loads `web-tree-sitter` and a WASM
+   grammar from `@vscode/tree-sitter-wasm` for Python, Go, Rust, Java, C/C++, C#, Ruby, PHP and Bash,
+   extracting definitions, imports and calls from the AST; Tier C runs per-language regex tables when
+   the pack is missing or `MUNINN_TREESITTER=0`. The indexer is async so the WASM parser initialises
+   once and every file reuses it.
+   Every symbol gets a canonical `<file>::<Class.method>` qualified name (duplicates get a line
+   suffix); every edge carries confidence.
+4. **Write and resolve** (one transaction): replace the changed file's rows, insert symbol ids,
+   rebuild name/qualified/file maps, resolve edges (import specifiers to files, names to same-file
+   then project-unique symbols), mark `ambiguous`/`external`/`unresolved`, prune deleted files and
+   dangling edges.
+5. **Queries** (`graph/queries.ts`): FTS5 symbol search, node with a line-numbered source slice,
+   callers/callees, bounded impact BFS, implementations, file imports, import cycles, affected
+   tests, file tree, and `buildExplore`, which assembles a budgeted Markdown answer.
+
+### 8.5 MCP surface
+
+`muninn_explore` returns Markdown directly (like `muninn_bootstrap`); `muninn_graph` and
+`muninn_code_search` return JSON. `muninn_project` is handled by the server itself because
+`action: "use"` switches the active project and reopens the service, and `action: "index"` refreshes
+the graph. The `initialize` response carries `buildServerInstructions()`, which names the project and
+the four rules before the first prompt.
+
+### 8.6 Diagnostics
+
+`muninn doctor` reads the registry, opens the project database read-only, reports memory and graph
+counts, and probes the known agent configuration files (portable, Claude, OpenCode, Codex TOML, Pi,
+Cursor), classifying each entry as `registered`, `missing`, `legacy` (huginn binary), `pinned`
+(`--project`) or `malformed`.
+
+### 8.7 Global memory
+
+Observations with scope = global are routed to a separate store at
+$MUNINN_HOME/global/memory.db. MemoryService.saveObservation detects the scope and delegates to a
+service bound to that store, so the project database never mixes scopes. The brief reads the global
+store read-only and renders a "Global preferences" section after identity and handoff; search and
+context include it only when includeGlobal is requested. A missing or corrupt global database is
+treated as "no global memory" and never breaks a project brief.
+
+### 8.8 Snapshots and portability
+
+The primary store is per machine and per user. muninn snapshot writes a deterministic JSONL file at
+<project>/.muninn/memory.jsonl through the existing sync path (atomic temp file, 0600, path-screened),
+and muninn restore merges it back with the existing id-based import. Export and import carry the new
+provenance columns (scope, agent, session_id, tags, files), so a restored global preference keeps its
+scope. Because the file is inside the repository it can be committed and travel with a clone.
+
+### 8.9 Hooks and watch mode
+
+muninn hook session-start prints the read-only brief and muninn hook session-end writes a handoff
+from the current branch, changed files and last commit. The contract is a command, so any agent with
+a hook mechanism can use it without Muninn knowing that mechanism; MCP initialize instructions remain
+the default path. muninn index --watch debounces filesystem events (1.2 s quiet window), ignores
+dependency and cache directories, and runs the same incremental indexer, so the graph stays fresh
+while an agent edits.

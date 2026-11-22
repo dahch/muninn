@@ -1,14 +1,40 @@
 # Muninn
 
-Persistent **semantic and symbol memory** for AI coding agents.
+Persistent **project memory and code graph** for AI coding agents.
 
-Muninn stores the things a coding session learns — architectural decisions, conventions,
-discoveries, bugfixes — next to the symbols they refer to, in a single SQLite file that lives
-with the project. It speaks **MCP** so any agent can save and query it, and it exposes the same
-engine as a plain Node/Bun library and a CLI.
+Muninn stores what a coding session learns — architectural decisions, conventions, discoveries,
+bugfixes, and the handoff that says where the work stopped — in a portable SQLite store keyed by
+a committed project identity. It also indexes the code as a graph (files, symbols, imports, calls,
+inheritance, tests) so an agent can ask for the relevant source and call paths instead of reading
+the repository. It speaks **MCP**, so any agent can use it, and exposes the same engine as a plain
+Node/Bun library and a CLI.
+
+Moving between agents, starting a new session or cloning the project does not lose context: the
+next session calls `muninn_bootstrap` and starts from the decisions and the handoff.
 
 It used to live inside [Huginn](https://github.com/dahch/huginn); it is now an independent
 package with no dependency on the orchestrator.
+
+## Why Muninn
+
+- **Local and deterministic.** One SQLite file, no server, no embeddings, no network. Search is
+  FTS5 + BM25; the same input always produces the same brief and the same graph.
+- **Identity that survives movement.** A committed uid (with Git remote and path fallbacks) keeps
+  memory attached across moves, clones, worktrees and machines; memory lives outside the checkout,
+  so it never dirties `git status`.
+- **Continuity first.** The active handoff — goal, state, next steps, open questions — renders at
+  the top of a bounded session brief (8k chars by default), so a new agent starts where the last
+  one stopped without reading the repository.
+- **A graph you can trust.** Derived, incremental and content-addressed. TypeScript/JavaScript use
+  the Compiler API; ten more languages use optional tree-sitter WASM grammars and a deterministic
+  heuristic fallback covers everything else, so no project is a blank graph. Every edge carries
+  confidence and resolution.
+- **One engine, three surfaces.** The library, the CLI and the MCP server share `MemoryService`,
+  the same storage rules and the same output contracts; thirteen MCP tools cover memory, graph,
+  handoff and contract verification.
+- **Agent-agnostic activation.** `initialize` instructions, marked rules blocks, opt-in hooks and
+  `muninn doctor` explain and fix why an agent is not seeing the memory, without assuming any one
+  agent's format.
 
 ## Overview
 
@@ -22,17 +48,23 @@ package with no dependency on the orchestrator.
   decisions, recent activity, path-selected indexed symbols, related graph neighbors, and counts.
   Bootstrap reads an existing database without DDL or project insertion and fails open when memory
   is missing or unusable.
-- **A symbol graph** — the TypeScript Compiler API extracts files, functions, classes,
-  interfaces and modules from your sources, plus the `imports`/`extends`/`implements`/
-  `references` edges between them, and links observations to symbols. The schema also reserves a
-  `calls` relation, but the current indexer does not emit call edges.
+- **A code graph** — files, symbols (functions, methods, classes, interfaces, types, structs,
+  traits and more) and the `imports`, `calls`, `extends`, `implements`, `references` and `contains`
+  edges between them, with line spans, signatures and confidence. Test files are flagged, so
+  `muninn_graph tests <file>` reports the tests affected by a change. TypeScript and
+  JavaScript are parsed with the Compiler API; other languages use optional tree-sitter WASM
+  grammars (Python, Go, Rust, Java, C, C++, C#, Ruby, PHP, Bash) when `web-tree-sitter` and
+  `@vscode/tree-sitter-wasm` are installed, and a deterministic heuristic scan otherwise — so no
+  project is a blank graph and the index never requires the optional pack. Indexing is incremental
+  and content-addressed.
 - **Graph-aware recovery** — `MemoryService.neighbors` traverses stored dependency edges in both
   directions, grouped by relation and direction, with deduplication, cycle protection, depth at most
   2 (default 1), and at most 50 neighbors (default 20). Briefs expand these neighbors by default,
   and `muninn_inspect_symbol` adds a bounded depth-1 traversal.
-- **MCP tools** for agents: `muninn_context`, `muninn_save`, `muninn_search`,
-  `muninn_link_symbol`, `muninn_inspect_symbol`, `muninn_verify_contract`, `muninn_stats`,
-  `muninn_bootstrap`.
+- **MCP tools** for agents: `muninn_bootstrap`, `muninn_explore`, `muninn_graph`,
+  `muninn_code_search`, `muninn_handoff`, `muninn_project`, `muninn_save`, `muninn_search`,
+  `muninn_context`, `muninn_link_symbol`, `muninn_inspect_symbol`, `muninn_stats`,
+  `muninn_verify_contract`.
 - **Contract verification** — the same TypeScript execution-contract check as a CLI command
   (`muninn check`) and as the `muninn_verify_contract` MCP tool.
 - **JSONL sync** — export/import the whole memory as portable line-delimited JSON.
@@ -50,6 +82,8 @@ package with no dependency on the orchestrator.
 - Node.js 20 or newer (the published package also runs under Bun)
 - A C/C++ toolchain for `better-sqlite3`'s native module when a prebuilt binary is unavailable
 - Git only if you want repository discovery and sanitized remote metadata; Muninn works outside a repository
+- Optional: `web-tree-sitter` and `@vscode/tree-sitter-wasm` (installed as optional dependencies) for
+  AST-precise extraction of non-TypeScript languages; without them the heuristic engine is used
 
 ## Getting Started
 
@@ -70,11 +104,31 @@ node dist/cli.js memory init --project .
 ## CLI
 
 ```sh
-muninn memory init   [--db <path>] [--project <path>]
+muninn memory init   [--db <path>] [--project <path>] [--no-marker]
 muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>]
 muninn memory sync   [--import] [--file <path>] [--project <path>]
 muninn memory index  [files...] [--project <path>] [--db <path>]
 muninn memory brief  [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
+muninn memory handoff [status|--goal <t> --state <s>|--close]
+
+muninn seed [--project <path>] [--dry-run] [--json]
+muninn index [--project <path>] [--full] [--watch] [--json] [--max-files <n>] [--exclude a,b] [--no-treesitter]
+muninn graph <relation> <symbol|file> [--depth <n>] [--limit <n>] [--json]
+muninn end-session [--goal <t>] [--state <s>] [--next "a;b"] [--question "x;y"]
+
+muninn hook <session-start|session-end> [--project <path>] [--budget <n>] [--json]
+            [--goal <t>] [--state <s>] [--next "a;b"] [--question "x;y"] [--agent <name>]
+muninn hooks <status|install|uninstall> [--home <path>] [--dry-run] [--force]
+muninn snapshot [--project <path>] [--file <path>] [--db <path>]
+muninn restore [--project <path>] [--file <path>] [--db <path>]
+
+muninn project resolve [path] [--json]
+muninn project list [--json]
+muninn project register [path]
+muninn project rename <name> [--project <path>]
+muninn project forget <uid|path> [--purge --force]
+muninn migrate [--from <db>] [--scan <dir>] [--dry-run] [--json]
+muninn doctor [--project <path>] [--json]
 
 muninn check [files...] [--project <path>]
 
@@ -84,10 +138,12 @@ muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>
              [--portable|--no-portable] [--no-rules] [--force] [--dry-run] [--status]
 ```
 
-The database resolves to `<git-root>/.huginn/muninn.db` inside a repository and to
-`~/.huginn/muninn.db` outside one. `--db` overrides it; `:memory:` is accepted for tests.
-Both the database file and the project record are resolved from the **same** root, so
-`--project X` can never write into another project's database.
+Identity lives in `<project>/.muninn/project.json` (commit it: it is the uid that makes memory
+survive a move, a clone or another machine). Memory lives in `$MUNINN_HOME/projects/<uid>/memory.db`
+(default `~/.muninn`), one file per project whether or not it is a Git repository, and the code
+graph lives next to it. `--db` overrides the file; `:memory:` is accepted for tests.
+`MUNINN_LEGACY_STORAGE=1` restores the pre-0.3 `.huginn` layout, and `muninn migrate` moves old
+databases into the portable store without touching them.
 
 `muninn memory brief` is read-only. `--paths` accepts up to 20 comma-separated files or directories
 (relative to the project root, or absolute inside it) and selects only indexed symbols. `--budget`
@@ -152,7 +208,9 @@ muninn setup --dry-run --agent all --project .   # report intended actions witho
 ```
 
 The catalog is `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`,
-`commandcode`, `omp`, `mcode`, and `mimo`. Path templates expand `{project}`, `{home}`, and
+`commandcode`, `omp`, `mcode`, `mimo`, and `dsh`. DSH Desktop is a **manual** destination: it stores MCP
+servers inside its `dsh-mcp` plugin rather than in a config file, so setup prints the steps instead of
+writing (install `dsh-mcp` in the profile, then add Muninn from its MCP UI). Path templates expand `{project}`, `{home}`, and
 `{opencodeConfigDir}`; `MUNINN_AGENT_<ID>_MCP_PATH` (colon-separated) overrides a target's paths, and
 `HUGINN_AGENT_<ID>_MCP_PATH` is accepted as an equivalent fallback. `MUNINN_OPENCODE_CONFIG_DIR`
 overrides the OpenCode config directory (`HUGINN_OPENCODE_CONFIG_DIR` is the fallback). Project-contained
@@ -181,8 +239,10 @@ table definitions, is reported with its path and cause, leaves the original unto
 continues to inspect the remaining destinations before exiting 1.
 
 Selected agents also receive a Markdown rules block delimited by `<!-- muninn:rules:start -->` and
-`<!-- muninn:rules:end -->`. It recommends `muninn_bootstrap` at session start, `muninn_search` and
-`muninn_inspect_symbol` before designing a change, and `muninn_verify_contract` before completing code.
+`<!-- muninn:rules:end -->`. It recommends `muninn_bootstrap` at session start (it carries the active
+decisions and the last handoff), `muninn_search` / `muninn_explore` / `muninn_graph` before designing a
+change, `muninn_save` for anything settled, `muninn_handoff` before finishing, `muninn_project` with
+action `index` when the graph is stale, and `muninn_verify_contract` before completing code.
 Setup appends the block to an existing rules file, creates the file only when a write is needed, and
 replaces only its own marked block on later runs. Agents that share a rules file (for example the
 various `AGENTS.md` destinations) receive one deduplicated block. Without `--agent`, rules are neither
@@ -198,6 +258,52 @@ report `written`, `present`, `stale`, or `failed`. A selected agent binary missi
 a nonfatal `not installed` warning and does not change the exit code. Targets with no meaningful local
 executable (`cursor`, `devin`) are not probed and never warn.
 
+## Portable memory, handoffs and the code graph
+
+**Identity and storage.** A project is identified by the uid in `.muninn/project.json`, falling
+back to the Git remote and then the resolved path. Every worktree of a repository shares one
+identity; every non-Git directory gets its own storage. Memory and graph live under
+`$MUNINN_HOME/projects/<uid>/`, so moving or cloning the project does not orphan them.
+
+**Handoffs.** `muninn_handoff` records the goal, current state, files touched, next steps, open
+questions and blockers. The active handoff is rendered **first** in `muninn_bootstrap`, so a new
+session in a different agent starts from it. `muninn end-session` fills the mechanical parts
+(branch, changed files, last commit) automatically.
+
+**Global memory.** An observation saved with `scope: "global"` goes to a separate cross-project
+store and appears in every project's brief under "Global preferences". `muninn_search` and
+`muninn_context` accept `includeGlobal` to consult it explicitly; the default stays project-local.
+
+**Portability.** `muninn snapshot` writes a deterministic `.muninn/memory.jsonl` inside the
+repository (commit it if you want memory to travel with the repo); `muninn restore` merges it back
+by observation id on any machine.
+
+**Seeding.** `muninn seed` turns the repository's own structured knowledge into memory: the README
+overview, build/test commands, a language and directory map, the agent conventions and every ADR.
+It is deterministic and idempotent, and never invents facts.
+
+**Code graph.** `muninn index` builds or refreshes the graph incrementally; `--watch` keeps it
+fresh while you edit, and `--no-treesitter` forces the heuristic engine for a run. In a Git work tree the file list comes from Git (so `.gitignore` is exact);
+outside Git the walker reads `.gitignore` itself. Agents query it through `muninn_explore` (source
++ callers + callees + related decisions), `muninn_graph` (node, callers, callees, impact,
+implementations, imports, cycles, tests, files) and `muninn_code_search`.
+
+**DSH Desktop sessions.** DSH mounts an MCP server once per profile, so the server has no
+per-session cwd. With `MUNINN_SESSION_AUTODETECT=dsh` (set in the server's `env`), Muninn follows
+the newest DSH session's working directory: if it is a project (marker or Git), it binds
+automatically; if it is a workspace containing several repositories, `muninn_bootstrap` lists them
+and the agent selects one with `muninn_project { action: "use" }`. Create the DSH workspace at a
+project root to make the binding fully automatic.
+
+**Activation.** The MCP `initialize` response carries project-aware instructions, and
+`muninn setup` installs a rules block that asks for `muninn_bootstrap`, `muninn_save` and
+`muninn_handoff`. Agents that support hooks can run `muninn hook session-start` (prints the brief)
+and `muninn hook session-end` (writes the handoff from git state); the contract is a command, so no
+per-agent format is assumed. For Claude Code, `muninn hooks install` merges those two commands into
+`~/.claude/settings.json` (opt-in, idempotent, and it never replaces unrelated hooks or settings). `muninn doctor` explains why an agent is not seeing the memory:
+missing entry, legacy `huginn` command, a pinned `--project`, or a runtime without MCP support
+(DSH Desktop reports this until an MCP plugin is installed in its profile).
+
 ## Architecture
 
 Muninn is one `MemoryService` core with three adapters: the CLI, the MCP stdio server, and the
@@ -210,12 +316,13 @@ flowchart LR
     CLI["CLI\nmuninn ..."] --> Service["MemoryService"]
     Library["Node/Bun library"] --> Service
     MCP --> Service
-    Service --> DB[("SQLite + FTS5\n.huginn/muninn.db")]
-    Service <--> JSONL["JSONL export/import\n.huginn/memories.jsonl"]
-    Indexer["AST indexer\nTypeScript Compiler API"] --> Service
+    Service --> DB[("SQLite + FTS5\n$MUNINN_HOME/projects/<uid>/memory.db")]
+    Service <--> JSONL["JSONL snapshot\n.muninn/memory.jsonl"]
+    Graph["Code graph\nCompiler API + tree-sitter + heuristic\nsrc/graph"] --> DB
     CLI --> Verifier["Contract verifier\nTypeScript Compiler API"]
     MCP --> Verifier
-    CLI --> Setup["Agent setup\nJSON/TOML catalog + portable"]
+    CLI --> Setup["Agent setup\nJSON/TOML catalog + rules + portable"]
+    Hooks["Hooks / doctor\nsession-start, session-end"] --> CLI
 ```
 
 See [`DESIGN.md`](./DESIGN.md) for the schema, service transactions, MCP validation pipeline, CLI
@@ -300,6 +407,11 @@ Muninn has no required environment variables. Configuration is passed as CLI fla
 
 | Variable | Type | Default | Purpose |
 |---|---|---|---|
+| `MUNINN_HOME` | directory path | `~/.muninn` | Root of the portable store (registry, per-project databases, graph indexes). |
+| `MUNINN_SESSION_AUTODETECT` | `dsh` | unset | Follow the newest DSH session's working directory: bind automatically when it is a project, or list the projects inside a workspace. |
+| `DSH_HOME` | directory path | `~/.dsh` | Used by `MUNINN_SESSION_AUTODETECT=dsh` to locate the session cache. |
+| `MUNINN_LEGACY_STORAGE` | `1` | unset | Restore the pre-0.3 `.huginn` database resolution (migration work only). |
+| `MUNINN_TREESITTER` | `0` | unset | Force Tier C heuristic extraction for every language instead of loading the optional tree-sitter WASM pack (`--no-treesitter` does the same for one run). |
 | `MUNINN_DEBUG` | string (presence is enough) | unset | Emit the `[muninn] mcp run: stdin closed by the client; shutting down.` diagnostic on stderr when the parent closes stdin. |
 | `HUGINN_DEBUG` | string (presence is enough) | unset | Legacy alias for `MUNINN_DEBUG`, retained for Huginn compatibility. |
 | `MUNINN_AGENT_<ID>_MCP_PATH` | string (colon-separated paths) | the catalog paths for that agent | Replace a setup target's MCP configuration paths. `<ID>` is the uppercase agent ID, for example `MUNINN_AGENT_CURSOR_MCP_PATH`; an all-empty override is rejected. |
@@ -364,9 +476,12 @@ section from [`CHANGELOG.md`](./CHANGELOG.md).
 src/
   cli.ts                 argument parsing, command routing, process entry point
   commands/              memory (init/search/sync/index/brief), mcp run, check, setup
-  db/                    SQLite client, schema.sql, path and project resolution
-  service/               MemoryService: save, search, context, links, sync, stats, brief, neighbors
-  indexer/               TypeScript/JavaScript AST symbol and dependency extraction
+  db/                    SQLite client, schema.sql, migrations, project records
+  project/               portable identity: marker, registry, Git worktrees, storage paths
+  graph/                 code graph: discovery, extraction, incremental indexing, queries
+  commands/              memory, project, migrate, seed, index/graph, handoff, doctor, mcp, check, setup
+  service/               MemoryService: save, search, context, links, sync, stats, brief, handoffs, neighbors
+  indexer/               legacy AST symbol and dependency extraction (kept for compatibility)
   mcp/                   MCP server, tool registry, Zod schemas, bounded stdio transport
   contracts/             in-process TypeScript contract verification
   setup/                 agent catalog/path resolution, JSON/TOML target merge, marked rules
@@ -382,6 +497,7 @@ test/                    Vitest integration suites for db, service, session brie
 - [`ADR.md`](./ADR.md) — architecture decision records and their implementation status.
 - [`CHANGELOG.md`](./CHANGELOG.md) — release notes.
 - [`plan.md`](./plan.md) — staged plan for the agent-setup work.
+- [`ROADMAP.md`](./ROADMAP.md) — the portable-memory and code-graph roadmap with completion state.
 - [`AGENTS.md`](./AGENTS.md) — repository conventions for coding agents; no `.opencode/agents/` are defined.
 
 ## Contributing

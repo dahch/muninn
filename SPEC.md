@@ -2,12 +2,15 @@
 
 Muninn is a standalone, local-first memory engine for coding agents and developers. It stores project observations in SQLite, supports lexical search and code-symbol indexing, and exposes memory operations through a library, CLI, and MCP server. It also provides read-only session bootstrap and bounded dependency-neighbor recovery. This specification adds autonomous setup for configuring Muninn in supported agents, including a portable MCP configuration and optional agent rules, without requiring Huginn.
 
-> **Implementation status:** iteration 4 implements the portable destination, the 13-entry agent
-> catalog, `--list`/`--agent` selection, marker and `MUNINN_AGENT_<ID>_MCP_PATH` resolution, the JSON
-> `mcpServers` / OpenCode `mcp` writers with project-path containment, dependency-free Codex TOML
-> merging, and marked rules installation with legacy-block handling. Setup also reports MCP and rules
-> outcomes separately, supports read-only status and dry-run, and warns when a selected agent binary is
-> not installed. See [`plan.md`](./plan.md) for the completed iteration record.
+> **Implementation status (0.3.0):** setup is complete as described below. On top of it, 0.3 adds
+> portable project identity (`.muninn/project.json` + registry + `muninn project`), storage under
+> `$MUNINN_HOME/projects/<uid>/`, non-destructive migration from `.huginn`, session handoffs,
+> deterministic seeding, an incremental multi-language code graph (files, symbols, edges, FTS) with
+> `muninn_explore`/`muninn_graph`/`muninn_code_search`, MCP `initialize` instructions, and
+> `muninn doctor`, global preferences, snapshots/restore, hooks and watch mode. The requirements below
+> remain the base contract; the 0.3 additions are documented in [`ROADMAP.md`](./ROADMAP.md), in
+> ADR-19 to ADR-27 and in `DESIGN.md` §8. See [`plan.md`](./plan.md) for the completed setup
+> iterations. Where a constraint below predates 0.3, it is annotated rather than silently dropped.
 
 ## Goals
 
@@ -25,7 +28,8 @@ Muninn is a standalone, local-first memory engine for coding agents and develope
 - Adding embeddings, vector search, network services, telemetry, or runtime dependencies.
 - Inferring decisions, symbols, dependencies, or other facts not stored in Muninn.
 - Checking whether an agent has started or connected to the configured MCP server.
-- Adding database tables or schema changes beyond the existing observation lifecycle fields.
+- Adding schema changes without an idempotent, `PRAGMA user_version`-tracked migration.
+- Embeddings, vector search, model-generated summaries, or inferring facts the repository does not state.
 - Cleaning up, renaming, or deleting unrelated agent configuration entries or files.
 
 ## Users and personas
@@ -54,7 +58,7 @@ Muninn is a standalone, local-first memory engine for coding agents and develope
 - The on-disk and embedded schema definitions agree on observation columns.
 - Existing FTS5 triggers continue to maintain the index on inserts, searches, and updates after migration.
 
-**REQ-3 — Resolve project and database paths safely.** Unless a database path is supplied, Muninn shall use `<git-root>/.huginn/muninn.db` in a Git repository and `~/.huginn/muninn.db` otherwise. The project root and database resolution shall use the same selected root. Existing path-safety checks shall protect database and JSONL paths.
+**REQ-3 — Resolve project and database paths safely.** Unless a database path is supplied, Muninn shall resolve a portable project identity (committed marker, then Git remote, then path) and use `$MUNINN_HOME/projects/<uid>/memory.db` (default `~/.muninn`). `MUNINN_LEGACY_STORAGE=1` restores the pre-0.3 `<git-root>/.huginn/muninn.db` / `~/.huginn/muninn.db` layout for migration. The project root and database resolution shall use the same resolved project. Existing path-safety checks shall protect database and JSONL paths.
 
 **AC-3**
 - An explicit `--project` root selects both the project record and default database location.
@@ -91,7 +95,8 @@ Muninn is a standalone, local-first memory engine for coding agents and develope
 - Existing filters and bounded limits work with the superseded-observation filter.
 - Context is ordered by `updated_at DESC, created_at DESC`.
 
-**REQ-7 — Preserve symbol indexing, inspection, and linking.** The TypeScript Compiler API indexer shall index supported TypeScript and JavaScript files, including file and symbol entities and stored `imports`, `extends`, `implements`, and `references` dependencies. The schema may permit `calls`, but the current indexer does not extract call edges. Observation-symbol linking and symbol inspection shall remain available.
+**REQ-7 — Index code as a graph, and preserve symbol inspection and linking.** The code graph shall index files, symbols (with line spans, signatures and kinds) and `imports`, `calls`, `extends`, `implements`, `references` and `contains` edges (test files
+are flagged so affected tests can be reported). TypeScript and JavaScript shall be parsed with the Compiler API; other supported languages shall use optional tree-sitter WASM grammars when installed, falling back to a deterministic heuristic scan otherwise. Edges shall record confidence (`exact`/`heuristic`) and resolution (`resolved`/`ambiguous`/`external`/`unresolved`). Indexing shall be incremental and content-addressed, prune deleted files and dangling edges, and expose bounded graph queries. The legacy `entities` tables, observation-symbol linking and symbol inspection shall remain available.
 
 **AC-7**
 - Indexing creates and updates entities and dependency edges and prunes obsolete indexed entities according to existing behavior.
@@ -176,10 +181,10 @@ Muninn is a standalone, local-first memory engine for coding agents and develope
 
 ### Agent setup catalog and command
 
-**REQ-17 — Provide a catalog of supported agent destinations.** Muninn shall define the setup catalog under `src/setup/` and integrate it with `src/commands/` and `src/cli.ts`. The catalog shall contain the 13 destinations `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`, `commandcode`, `omp`, `mcode`, and `mimo`. Each destination shall define an ID, label, format, MCP paths, and rules file, matching the routes and formats of the Huginn integrator reference.
+**REQ-17 — Provide a catalog of supported agent destinations.** Muninn shall define the setup catalog under `src/setup/` and integrate it with `src/commands/` and `src/cli.ts`. The catalog shall contain the 14 destinations `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`, `commandcode`, `omp`, `mcode`, `mimo`, and `dsh`. Each destination shall define an ID, label, format, MCP paths, and rules file, matching the routes and formats of the Huginn integrator reference. `dsh` is a `manual` destination: it has no mergeable MCP path and setup reports the `dsh-mcp` plugin steps instead.
 
 **AC-17**
-- Catalog IDs are unique and exactly cover the 13 listed destinations.
+- Catalog IDs are unique and exactly cover the 14 listed destinations.
 - Catalog routes and formats match the reference definitions; any correction is covered by a test that fixes the intended route.
 - MCP paths support `{project}`, `{home}`, and `{opencodeConfigDir}` markers.
 - `resolveMcpPaths(target, { projectPath, homeDir, opencodeConfigDir, env })` expands markers using platform path APIs.
@@ -227,7 +232,7 @@ Setup shall include `--project <absolute path>` only for configuration files con
 
 ### Agent rules
 
-**REQ-21 — Install marked usage rules for selected agents.** When one or more agents are selected, setup shall install a Muninn rules block by default unless `--no-rules` is supplied. The block shall be delimited by `<!-- muninn:rules:start -->` and `<!-- muninn:rules:end -->`. The rules shall recommend calling `muninn_bootstrap` once at session start, using `muninn_search` and `muninn_inspect_symbol` before designing a change, and using `muninn_verify_contract` before completing code. They shall not mention Huginn.
+**REQ-21 — Install marked usage rules for selected agents.** When one or more agents are selected, setup shall install a Muninn rules block by default unless `--no-rules` is supplied. The block shall be delimited by `<!-- muninn:rules:start -->` and `<!-- muninn:rules:end -->`. The rules shall recommend calling `muninn_bootstrap` once at session start, using `muninn_search`, `muninn_explore` and `muninn_graph` before designing a change, recording settled knowledge with `muninn_save`, calling `muninn_handoff` before finishing, indexing through `muninn_project` when the graph is stale, and using `muninn_verify_contract` before completing code. They shall not mention Huginn.
 
 **AC-21**
 - Installing the same rules twice is idempotent; the second run reports `changed: false`.
@@ -331,7 +336,10 @@ Observation lifecycle is `active` → `superseded`. A superseded observation ret
 - Existing MCP tool names and required inputs remain compatible; existing tool additions are optional.
 - Maintain TypeScript strict mode, ESM, and `.js` extensions for relative imports.
 - Do not add runtime dependencies.
-- Do not add database tables or schema changes beyond `observations.status` and `observations.superseded_by`.
+- Do not add database tables or schema changes beyond `observations.status` and
+  `observations.superseded_by` **for the 0.2 lifecycle change**. 0.3 adds `handoffs`, the
+  `code_*` tables and provenance columns through the `user_version` migration described in ADR-19 to
+  ADR-22; any further schema change follows the same idempotent, tracked migration rule.
 - Keep the duplicated database schema definitions synchronized.
 - Update `README.md`, `DESIGN.md`, `ADR.md`, and `CHANGELOG.md` with the setup feature.
 - Record in an ADR that Muninn owns its setup catalog and that Huginn may consume it. The ADR shall explain the distinction between machine-oriented MCP configuration and human-authored rules prose: MCP entries are merged structurally, while rules are managed as marked, appended blocks with legacy-block detection, despite being installed by default for selected agents.
@@ -343,9 +351,13 @@ Observation lifecycle is `active` → `superseded`. A superseded observation ret
 - Deleting or cleaning up unrelated servers, configuration keys, rules, or files.
 - Rewriting unrelated configuration content or replacing unmarked human-authored rules.
 - Probing whether an agent connects or starts the MCP server.
-- Conversation/transcript ingestion, hooks, or session parsing.
+- Conversation/transcript ingestion and session parsing. Session-start/end **hooks** were added in
+  0.3 (ADR-26): they print the brief and write a handoff from Git state, and never parse a transcript.
 - Model-generated summaries or memory content.
 - Embeddings, vector databases, network services, or new runtime dependencies.
-- New database tables or observation schema changes beyond the two lifecycle columns.
-- A new graph MCP tool or relationships inferred without stored dependency edges.
+- ~~New database tables or observation schema changes beyond the two lifecycle columns.~~ Superseded
+  in 0.3 by the `handoffs` and `code_*` tables (ADR-21, ADR-22); facts are still never invented.
+- ~~A new graph MCP tool or relationships inferred without stored dependency edges.~~ Superseded in
+  0.3 by `muninn_explore`, `muninn_graph` and `muninn_code_search` (ADR-23). Relationships are still
+  read only from stored edges.
 - Package publication or version changes as part of setup, aside from the required changelog entry.

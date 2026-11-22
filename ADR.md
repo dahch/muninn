@@ -318,3 +318,132 @@ marked rules with legacy-block handling).
   Stale legacy content requires explicit `--force`, ambiguous markers fail closed, and partial setup
   results are visible as separate MCP and rules rows. Missing agent executables are informational rather
   than setup failures; Muninn reports installation state, not whether an agent connects to the server.
+
+## ADR-19: Identify a project by a committed uid, not by its path
+
+**Status:** Implemented.
+
+`root_path` was the identity, so moving, renaming or recloning a project orphaned its memory, and
+every non-Git directory shared one database. A project now carries `.muninn/project.json` with a
+stable `uid`; resolution falls back to the Git remote (clones share identity) and then the resolved
+path. A user registry under `$MUNINN_HOME` maps uid to the paths and remotes it has been seen at.
+The marker is committed; the registry is a convenience, never the source of truth.
+
+## ADR-20: Store memory outside the repository, one file per project
+
+**Status:** Implemented.
+
+Keeping the database in `<git-root>/.huginn/` made it invisible to clones and forced non-Git
+projects into one shared file. Memory and the code graph now live in
+`$MUNINN_HOME/projects/<uid>/`: isolated per project, portable across clones and machines, and
+outside `git status`. The repository only carries the marker. The existing symlink screen still
+applies to the resolved paths; the containment root moved from the project to `$MUNINN_HOME`.
+
+## ADR-21: Continuity is a first-class record, not an observation category
+
+**Status:** Implemented.
+
+"Where we left off" is structured: goal, state, files touched, next steps, open questions,
+blockers and linked decisions. Modelling it as another observation category would have forced a
+SQLite CHECK rebuild and lost the structure. A dedicated `handoffs` table keeps one active record
+per project, supersedes the previous one atomically, and renders first in the session brief.
+Observation provenance (`agent`, `session_id`, `scope`, `tags`, `files`) was added with plain
+idempotent `ALTER TABLE` steps instead.
+
+## ADR-22: The code graph is derived, incremental and confidence-labelled
+
+**Status:** Implemented.
+
+The graph is derived state, so it is rebuilt from the source and never authored. Files are
+content-addressed by hash (`code_index_state`), only changed files are parsed, and a transaction
+replaces their symbols and edges; deleted files and dangling edges are pruned. TypeScript and
+JavaScript use the Compiler API (exact imports, heritage and local calls); other languages use a
+deterministic heuristic scan. Every edge records `confidence` (`exact`/`heuristic`) and
+`resolution` (`resolved`/`ambiguous`/`external`/`unresolved`) so callers can tell a resolved call
+from a name match. Files come from `git ls-files` in a work tree and from a `.gitignore`-aware
+walker otherwise, so non-Git projects are first-class. ADR-25 adds the optional tree-sitter Tier B
+and keeps the heuristic scan as the always-available fallback.
+
+## ADR-23: One strong exploration tool, with a small graph menu
+
+**Status:** Implemented.
+
+Agents explore better with one broad tool than with a menu of narrow ones. `muninn_explore`
+returns ranked symbols' verbatim source, their callers and callees, and related decisions within a
+fixed budget; `muninn_graph` exposes the individual relations for callers that know what they want.
+Both read only the database and slice source for the selected symbols, so an agent never reads the
+repository to find one function. The MCP `initialize` response also carries project-aware
+instructions, because activation cannot depend on an agent choosing to read a rules file.
+
+## ADR-24: Migrate legacy databases without touching them
+
+**Status:** Implemented.
+
+`muninn migrate` opens legacy `.huginn` databases read-only, resolves each stored `root_path` to its
+portable uid, and copies observations, entities, links and dependencies into the new store with
+stable ids, remapping entities by identifier when the target already has them. Re-running is
+idempotent, and the legacy file is left byte-identical. Dry runs report counts without writing.
+
+## ADR-25: Multi-language extraction is optional and degrades, never fails
+
+**Status:** Implemented. Extends ADR-22 and supersedes the "heuristic only" wording of ADR-6 and
+ADR-11 for non-TypeScript languages.
+
+**Context:** A single-language graph is useless in real repositories. Requiring `tree-sitter` as a
+hard dependency would make installation fail without a WASM pack and slow the cold start, while
+shipping only a regex scanner would lose structure in Python, Go or Rust where it is cheap to get.
+
+**Decision:** Keep the Compiler API as the exact Tier A engine for TypeScript/JavaScript, add Tier B
+as an optional dependency pair (`web-tree-sitter` + `@vscode/tree-sitter-wasm`) lazily loaded per
+language, and keep Tier C — deterministic per-language regex tables — as the always-available
+fallback for Python, Go, Rust, Java, C/C++, C#, Ruby, PHP and Bash. `MUNINN_TREESITTER=0` or
+`--no-treesitter` forces Tier C for a run. Every edge carries `confidence` (`exact`/`heuristic`) and
+`resolution`, so a consumer can tell an AST-resolved call from a name match.
+
+**Consequences:** No project is a blank graph, installs never fail because the optional pack is
+missing, and the indexer is asynchronous so one WASM initialisation is shared by every file. Tier C
+can misattribute calls, which is exactly why confidence is stored rather than assumed. Adding a
+language means adding a grammar id or a regex table, not a new pipeline.
+
+## ADR-26: Activation cannot depend on the agent reading a file
+
+**Status:** Implemented.
+
+**Context:** Rules files are advisory: an agent that never reads them still has to find the memory.
+Agents also differ in transport — some mount one MCP server per profile with no per-session cwd,
+some can run shell hooks, some neither.
+
+**Decision:** Activate on four independent channels. (1) The MCP `initialize` response carries
+project-aware instructions, so every client sees the rules before its first prompt. (2) The marked
+rules block is installed by `muninn setup` for agents that read one. (3) Hooks are a command
+contract — `muninn hook session-start` prints the brief and `muninn hook session-end` writes a handoff
+from Git state — so any hook mechanism can use them, and `muninn hooks install` merges those two into
+Claude Code's `settings.json` only on request. (4) `muninn doctor` diagnoses the rest: missing or
+legacy entries, a pinned `--project`, a malformed file, or a runtime without MCP support.
+
+For a profile-scoped server with no session cwd, `MUNINN_SESSION_AUTODETECT=dsh` follows the newest
+DSH session's recorded working directory. If that directory is a project it binds automatically; if it
+is a workspace it lists the candidate repositories and `muninn_project { action: "use" }` pins one for
+the rest of the process, including `muninn_bootstrap`.
+
+**Consequences:** No agent is privileged and none is assumed. Autodetection is opt-in, an explicit
+`use` wins over it, and a workspace is never guessed. Hooks may double-write a handoff if an agent
+both hooks and calls `muninn_handoff`; the newest handoff supersedes the previous one, so the result
+stays consistent.
+
+## ADR-27: Global preferences and repository snapshots are the portability layer
+
+**Status:** Implemented.
+
+**Context:** Two continuity gaps remain after portable identity: a preference that applies to every
+project has no home, and moving memory between machines required copying a database.
+
+**Decision:** Route `scope: "global"` observations to a separate store under
+`$MUNINN_HOME/global/`; the project brief renders them under "Global preferences", and search/context
+include them only with `includeGlobal`. Provide `muninn snapshot` / `muninn restore` over the existing
+idempotent JSONL sync, writing `<project>/.muninn/memory.jsonl` for the user to commit. Provenance
+(`scope`, `agent`, `session_id`, `tags`, `files`) travels with both.
+
+**Consequences:** Preferences survive across projects and restores keep their scope. The snapshot is
+merge-by-id, so it is not a conflict-resolution protocol, and committing it puts memory under review
+like any other file. The per-project database remains the source of truth.

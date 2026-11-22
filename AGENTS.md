@@ -31,11 +31,16 @@ Vitest default; the repository config sets a 20-second timeout.
 
 ### Architecture map
 
-- `src/db/` — SQLite connection, schema, database path resolution, project records.
-- `src/service/` — `MemoryService`: storage, retrieval, session brief, and graph-neighbor traversal.
-- `src/indexer/` — TypeScript/JavaScript AST extraction and dependency indexing.
+- `src/db/` — SQLite connection, schema.sql, `user_version` migrations, project records.
+- `src/project/` — portable identity: marker, registry, Git worktrees, storage paths, and DSH
+  session workspace resolution (`session.ts`).
+- `src/graph/` — code graph: discovery, Tier A/B/C extraction (`extractor.ts`, `treesitter.ts`),
+  incremental indexing, bounded queries and `explore` assembly.
+- `src/service/` — `MemoryService`: storage, retrieval, session brief, handoffs, graph neighbors.
+- `src/indexer/` — legacy TypeScript/JavaScript AST extraction kept for compatibility.
 - `src/mcp/` — MCP server, tool registry, Zod schemas, argument normalization, bounded stdio.
-- `src/commands/` — CLI handlers for memory, MCP, contract verification, and setup.
+- `src/commands/` — CLI handlers for memory, MCP, contract verification, setup, seed, index/graph,
+  project identity, migrate, handoff/end-session, doctor, snapshot/restore and hooks.
 - `src/setup/` — agent catalog and path resolution (`registry.ts`), JSON `mcpServers` / OpenCode `mcp`
   target merging (`json-target.ts`), dependency-free Codex TOML merge/diagnostics (`toml-target.ts`),
   the portable MCP configuration installer/diagnostic (`portable.ts`), and the marked agent rules
@@ -49,8 +54,14 @@ for the staged setup scope.
 
 ### Invariants
 
-- `src/db/schema.sql` and the `SCHEMA_SQL` fallback in `src/db/client.ts` must stay in sync.
-- Database migrations must be idempotent and preserve existing rows, indexes, FTS triggers, and data.
+- `src/db/schema.sql` and the `SCHEMA_SQL` fallback in `src/db/client.ts` must stay in sync
+  byte-for-byte (the test compares them).
+- Database migrations must be idempotent, tracked with `PRAGMA user_version`, and preserve existing
+  rows, indexes, FTS triggers, and data.
+- Portable storage lives under `MUNINN_HOME`; never reintroduce a default database path inside the
+  repository. `.muninn/project.json` is the committed identity and must be written atomically.
+- The code graph is derived state: index incrementally by content hash, prune deleted files and
+  dangling edges, and label every edge with `confidence` and `resolution`.
 - Observation creation and decision supersession happen in one SQLite transaction.
 - Default `search` and `getContext` exclude superseded observations; `includeSuperseded` opts in.
 - Session bootstrap uses `getReadOnlyDatabase` / `readSessionBrief`: it must not create directories or
@@ -76,11 +87,17 @@ for the staged setup scope.
 <!-- muninn:rules:start -->
 ## Muninn project memory
 
-- Call `muninn_bootstrap` once at the start of a session to load the project brief.
-- Before designing a change, use `muninn_search` and `muninn_inspect_symbol` to check prior decisions and the relevant code.
+- Call `muninn_bootstrap` once at the start of a session to load the project brief. It includes
+  the active decisions and where the last session stopped.
+- Before designing a change, use `muninn_search`, `muninn_explore` and `muninn_graph` instead of
+  reading the repository. `muninn_explore` returns the relevant source, callers and callees.
 - When a session settles something the project should remember — a convention, a tradeoff, a
   discovered constraint, or a bug that took real work — record it with `muninn_save` before you
   finish. Use a `topicKey` for anything a later decision could replace, so the newer one supersedes
   it instead of contradicting it.
+- Before finishing, call `muninn_handoff` with the goal, the current state, the next steps and any
+  open questions. This is required: it is what lets a new session in another agent start without
+  re-reading the project.
+- If the code index is empty or stale, call `muninn_project` with action `index`.
 - Before completing code, use `muninn_verify_contract` to verify the execution contract.
 <!-- muninn:rules:end -->
