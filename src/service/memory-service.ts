@@ -4,6 +4,15 @@ import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { assertDocPath } from "../util/path-safety.js";
 import {
+  deriveProjectUid,
+  globalMemoryDbPath,
+  globalMemoryDir,
+  memoryJsonlPath,
+  registerProjectContext,
+  resolveProjectContext,
+  type ProjectContext,
+} from "../project/identity.js";
+import {
   getDatabase,
   getReadOnlyDatabase,
   ensureProject,
@@ -71,6 +80,60 @@ export interface SaveObservationInput {
   projectId?: string;
   project_id?: string;
   symbols?: Array<SymbolInput | string> | null;
+  /** Agent that produced the observation (provenance, never required). */
+  agent?: string | null;
+  sessionId?: string | null;
+  session_id?: string | null;
+  /** `project` (default) or `global`. */
+  scope?: "project" | "global" | null;
+  tags?: string[] | null;
+  files?: string[] | null;
+  /** Explicit id, used by deterministic seed/upsert flows. */
+  id?: string;
+}
+
+/**
+ * A session handoff: the structured "where we left off" record a new session
+ * reads before doing anything else. One handoff is active per project; saving a
+ * new one supersedes the previous active handoff.
+ */
+export interface HandoffInput {
+  goal: string;
+  state: string;
+  projectId?: string;
+  project_id?: string;
+  agent?: string | null;
+  sessionId?: string | null;
+  session_id?: string | null;
+  branch?: string | null;
+  filesTouched?: string[] | null;
+  files_touched?: string[] | null;
+  openQuestions?: string[] | null;
+  open_questions?: string[] | null;
+  nextSteps?: string[] | null;
+  next_steps?: string[] | null;
+  decisions?: string[] | null;
+  blockers?: string[] | null;
+  /** Mark the handoff closed instead of active (it is no longer "current"). */
+  closed?: boolean;
+}
+
+export interface Handoff {
+  id: string;
+  project_id: string;
+  goal: string;
+  state: string;
+  status: "active" | "superseded" | "closed";
+  agent: string | null;
+  session_id: string | null;
+  branch: string | null;
+  files_touched: string[];
+  open_questions: string[];
+  next_steps: string[];
+  decisions: string[];
+  blockers: string[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SearchOptions {
@@ -81,6 +144,9 @@ export interface SearchOptions {
   allProjects?: boolean | null;
   includeSuperseded?: boolean | null;
   include_superseded?: boolean | null;
+  /** Include `scope = global` observations from the cross-project store. */
+  includeGlobal?: boolean | null;
+  include_global?: boolean | null;
   limit?: number | null;
 }
 
@@ -98,6 +164,9 @@ export interface ContextOptions {
   allProjects?: boolean | null;
   includeSuperseded?: boolean | null;
   include_superseded?: boolean | null;
+  /** Include `scope = global` observations from the cross-project store. */
+  includeGlobal?: boolean | null;
+  include_global?: boolean | null;
 }
 
 export interface SyncToDiskOptions {
@@ -209,6 +278,10 @@ export interface SessionBriefContent {
   symbols: Entity[];
   /** Deduplicated graph neighbors of the path-selected symbols. */
   related: SymbolNeighbor[];
+  /** The project's active session handoff, when one exists. */
+  handoff?: Handoff | null;
+  /** Cross-project `scope = global` observations, when the store exists. */
+  globalObservations?: Observation[];
   counts: SessionBriefCounts;
   notes: string[];
   budgetChars: number;
@@ -254,11 +327,20 @@ export interface IMemoryService {
     options?: NeighborOptions
   ): SymbolNeighbors | null;
   getStats(projectId?: string): MemoryStats;
+  saveHandoff(input: HandoffInput): Handoff;
+  getActiveHandoff(projectId?: string): Handoff | null;
+  getHandoff(id: string): Handoff | null;
+  listHandoffs(options?: {
+    projectId?: string;
+    limit?: number | null;
+    includeSuperseded?: boolean | null;
+  }): Handoff[];
+  closeHandoff(projectId?: string): boolean;
   getSessionBrief(options?: SessionBriefOptions): SessionBrief;
   syncToDisk(
     targetPath?: string,
     options?: { projectId?: string; allProjects?: boolean }
-  ): { path: string; count: number };
+  ): { path: string; count: number; handoffs?: number };
   importFromDisk(sourcePath?: string): { imported: number; skipped: number };
   close?(force?: boolean): void;
 }
@@ -574,6 +656,71 @@ function resolveEntityByIdentifier(
     .get(projectId, escapedQuery, query);
 }
 
+function toJsonArray(values?: string[] | null): string | null {
+  if (!Array.isArray(values)) return null;
+  const cleaned = values
+    .map((value) => String(value).trim())
+    .filter((value) => value.length > 0);
+  return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+}
+
+function parseJsonArray(raw?: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+interface HandoffRow {
+  id: string;
+  project_id: string;
+  goal: string;
+  state: string;
+  status: "active" | "superseded" | "closed";
+  agent: string | null;
+  session_id: string | null;
+  branch: string | null;
+  files_touched: string | null;
+  open_questions: string | null;
+  next_steps: string | null;
+  decisions: string | null;
+  blockers: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToHandoff(row: HandoffRow): Handoff {
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    goal: row.goal,
+    state: row.state,
+    status: row.status,
+    agent: row.agent,
+    session_id: row.session_id,
+    branch: row.branch,
+    files_touched: parseJsonArray(row.files_touched),
+    open_questions: parseJsonArray(row.open_questions),
+    next_steps: parseJsonArray(row.next_steps),
+    decisions: parseJsonArray(row.decisions),
+    blockers: parseJsonArray(row.blockers),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function requireNonEmpty(value: string | null | undefined, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label} is required and cannot be empty`);
+  }
+  return value.trim();
+}
+
 function resolveNeighborDepth(value: number | null | undefined): number {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return DEFAULT_NEIGHBOR_DEPTH;
@@ -775,6 +922,53 @@ function buildSessionBriefMarkdown(content: SessionBriefContent): string {
   }
   if (content.project.gitRemote) {
     lines.push(`- Git remote: ${content.project.gitRemote}`);
+  }
+
+  // Continuity comes before history: a fresh session needs to know what was in
+  // progress before it needs the decision log.
+  if (content.handoff) {
+    const handoff = content.handoff;
+    lines.push("", "## Where we left off");
+    lines.push(`- Goal: ${handoff.goal}`);
+    lines.push(`- State: ${handoff.state}`);
+    if (handoff.agent) lines.push(`- Agent: ${handoff.agent}`);
+    if (handoff.session_id) lines.push(`- Session: ${handoff.session_id}`);
+    if (handoff.branch) lines.push(`- Branch: ${handoff.branch}`);
+    if (handoff.files_touched.length > 0) {
+      lines.push(`- Files touched: ${handoff.files_touched.join(", ")}`);
+    }
+    if (handoff.next_steps.length > 0) {
+      lines.push("", "### Next steps");
+      handoff.next_steps.forEach((step, index) => {
+        lines.push(`${index + 1}. ${step}`);
+      });
+    }
+    if (handoff.open_questions.length > 0) {
+      lines.push("", "### Open questions");
+      for (const question of handoff.open_questions) {
+        lines.push(`- ${question}`);
+      }
+    }
+    if (handoff.blockers.length > 0) {
+      lines.push("", "### Blockers");
+      for (const blocker of handoff.blockers) {
+        lines.push(`- ${blocker}`);
+      }
+    }
+    if (handoff.decisions.length > 0) {
+      lines.push("", "### Decisions linked to this handoff");
+      for (const decision of handoff.decisions) {
+        lines.push(`- \`${decision}\``);
+      }
+    }
+  }
+
+  if (content.globalObservations && content.globalObservations.length > 0) {
+    lines.push("", "## Global preferences");
+    for (const observation of content.globalObservations) {
+      const firstLine = observation.content.split("\n").find((line) => line.trim()) ?? "";
+      lines.push(`- **${observation.title}** ` + `[${observation.category}] ${firstLine.slice(0, 240)}`);
+    }
   }
 
   lines.push("", "## Counts");
@@ -1043,12 +1237,57 @@ function assembleSessionBrief(
     }
   }
 
+  let handoff: Handoff | null = null;
+  if (projectId) {
+    try {
+      const handoffRow = db
+        .prepare<[string], HandoffRow>(
+          `SELECT id, project_id, goal, state, status, agent, session_id, branch,
+                  files_touched, open_questions, next_steps, decisions, blockers,
+                  created_at, updated_at
+           FROM handoffs
+           WHERE project_id = ? AND status = 'active'
+           ORDER BY updated_at DESC, created_at DESC, rowid DESC
+           LIMIT 1`
+        )
+        .get(projectId);
+      handoff = handoffRow ? rowToHandoff(handoffRow) : null;
+    } catch {
+      // A database created before handoffs existed: the brief stays useful.
+      handoff = null;
+    }
+  }
+
+  let globalObservations: Observation[] = [];
+  try {
+    const globalDb = getReadOnlyDatabase(globalMemoryDbPath());
+    try {
+      globalObservations = globalDb
+        .prepare<[], Observation>(
+          `SELECT id, project_id, category, title, content, topic_key, status,
+                  superseded_by, scope, agent, session_id, tags, files,
+                  created_at, updated_at
+           FROM observations
+           WHERE scope = 'global' AND status = 'active'
+           ORDER BY updated_at DESC, created_at DESC, rowid DESC
+           LIMIT 8`
+        )
+        .all();
+    } finally {
+      globalDb.close();
+    }
+  } catch {
+    globalObservations = [];
+  }
+
   const content: SessionBriefContent = {
     project,
     activeDecisions: { keyed, unkeyed },
     recentActivity,
     symbols,
     related,
+    handoff,
+    globalObservations,
     counts,
     notes,
     budgetChars,
@@ -1190,24 +1429,46 @@ export class MemoryService implements IMemoryService {
   private readonly _db: Database.Database;
   private readonly _currentProject: Project;
   private readonly isDbOwned: boolean;
+  private readonly _context: ProjectContext;
 
   constructor(options?: MemoryServiceOptions) {
+    // Resolve identity first: a `--project src/auth` is normalised to the real
+    // project root, so a subdirectory can never become a second project.
+    this._context = resolveProjectContext({
+      startDir: options?.projectRoot ?? process.cwd(),
+      explicitRoot: options?.projectRoot,
+    });
+
     if (options?.db) {
       this._db = options.db;
       this.isDbOwned = false;
     } else {
       // ONE root for both (ADR-49): the database file and the project record are
-      // resolved from `projectRoot`, so `--project X` can never label a row in
+      // resolved from the same context, so `--project X` can never label a row in
       // another project's database.
-      this._db = getDatabase(options?.dbPath, options?.projectRoot);
+      this._db = getDatabase(options?.dbPath, this._context.rootPath);
       this.isDbOwned = true;
     }
 
     try {
       this._currentProject = ensureProject(this._db, {
-        rootPath: options?.projectRoot,
-        startDir: options?.projectRoot,
+        rootPath: this._context.rootPath,
+        startDir: this._context.rootPath,
+        uid: this._context.uid,
+        kind: this._context.kind,
+        gitRemote: this._context.gitRemote ?? undefined,
       });
+      registerProjectContext(
+        {
+          ...this._context,
+          // The row is the authoritative name once it exists (a rename through
+          // `muninn project rename` must not be undone by a directory rename).
+          name: this._currentProject.name,
+          rootPath: this._currentProject.root_path,
+          uid: this._currentProject.uid ?? this._context.uid,
+        },
+        process.env
+      );
     } catch (err) {
       if (this.isDbOwned && this._db?.open) {
         this._db.close();
@@ -1222,6 +1483,83 @@ export class MemoryService implements IMemoryService {
 
   public get currentProject(): Project {
     return this._currentProject;
+  }
+
+  /** True when this service is bound to the cross-project global store. */
+  private isGlobalProject(): boolean {
+    return (
+      path.resolve(this._currentProject.root_path) ===
+      path.resolve(globalMemoryDir())
+    );
+  }
+
+  /**
+   * Reads the cross-project store read-only. A missing or corrupt file simply
+   * yields no global memories: it must never make a project brief fail.
+   */
+  private readGlobalObservations(limit: number, query?: string, category?: string | null): Observation[] {
+    let db: Database.Database | null = null;
+    try {
+      db = getReadOnlyDatabase(globalMemoryDbPath());
+    } catch {
+      return [];
+    }
+    try {
+      const conditions: string[] = ["o.status = 'active'", "o.scope = 'global'"];
+      const params: Array<string | number> = [];
+      if (category) {
+        conditions.push("o.category = ?");
+        params.push(category);
+      }
+      let sql: string;
+      if (query) {
+        const sanitized = sanitizeFtsQuery(query);
+        if (!sanitized) return [];
+        sql = `SELECT o.id, o.project_id, o.category, o.title, o.content, o.topic_key,
+                      o.status, o.superseded_by, o.scope, o.agent, o.session_id,
+                      o.tags, o.files, o.created_at, o.updated_at
+               FROM observations_fts
+               JOIN observations o ON o.rowid = observations_fts.rowid
+               WHERE observations_fts MATCH ? AND ${conditions.join(" AND ")}
+               ORDER BY bm25(observations_fts) ASC
+               LIMIT ?`;
+        params.unshift(sanitized);
+      } else {
+        sql = `SELECT o.id, o.project_id, o.category, o.title, o.content, o.topic_key,
+                      o.status, o.superseded_by, o.scope, o.agent, o.session_id,
+                      o.tags, o.files, o.created_at, o.updated_at
+               FROM observations o
+               WHERE ${conditions.join(" AND ")}
+               ORDER BY o.updated_at DESC, o.created_at DESC, o.rowid DESC
+               LIMIT ?`;
+      }
+      params.push(limit);
+      return db.prepare<Array<string | number>, Observation>(sql).all(...params);
+    } catch {
+      return [];
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Stable uid of the project this service is bound to. */
+  public get projectUid(): string {
+    return (
+      this._currentProject.uid ??
+      deriveProjectUid({
+        gitRemote: this._currentProject.git_remote,
+        rootPath: this._currentProject.root_path || this._context.rootPath,
+      })
+    );
+  }
+
+  /**
+   * Default portable snapshot: `$MUNINN_HOME/projects/<uid>/memories.jsonl`.
+   * It lives next to the database, outside the repository, so a project that is
+   * not a Git repository can snapshot its memory too.
+   */
+  public memoryExportPath(): string {
+    return memoryJsonlPath(this.projectUid);
   }
 
   /**
@@ -1253,6 +1591,18 @@ export class MemoryService implements IMemoryService {
    * Saves an observation and transactionally links any provided symbols.
    */
   public saveObservation(input: SaveObservationInput): ObservationWithEntities {
+    const requestedScope = input.scope ?? "project";
+    if (requestedScope === "global" && !this.isGlobalProject()) {
+      const global = new MemoryService({
+        dbPath: globalMemoryDbPath(),
+        projectRoot: globalMemoryDir(),
+      });
+      try {
+        return global.saveObservation({ ...input, scope: "global" });
+      } finally {
+        global.close(true);
+      }
+    }
     const category = input.category as ObservationCategory;
     if (!VALID_CATEGORIES.includes(category)) {
       throw new Error(
@@ -1282,13 +1632,14 @@ export class MemoryService implements IMemoryService {
       input.supersedesTopicKey !== undefined
         ? input.supersedesTopicKey
         : (input.supersedes_topic_key ?? null);
-    const observationId = crypto.randomUUID();
+    const observationId = input.id?.trim() || crypto.randomUUID();
 
     return this._db.transaction(() => {
       this._db
         .prepare(
-          `INSERT INTO observations (id, project_id, category, title, content, topic_key)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO observations
+             (id, project_id, category, title, content, topic_key, scope, agent, session_id, tags, files)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           observationId,
@@ -1296,7 +1647,12 @@ export class MemoryService implements IMemoryService {
           category,
           input.title.trim(),
           input.content,
-          topicKey
+          topicKey,
+          requestedScope,
+          input.agent ?? null,
+          input.sessionId ?? input.session_id ?? null,
+          toJsonArray(input.tags),
+          toJsonArray(input.files)
         );
 
       // Explicit decision replacement is part of the same transaction: either
@@ -1363,7 +1719,8 @@ export class MemoryService implements IMemoryService {
 
       const observation = this._db
         .prepare<[string], Observation>(
-          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
+          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by,
+                  scope, agent, session_id, tags, files, created_at, updated_at
            FROM observations
            WHERE id = ?`
         )
@@ -1390,6 +1747,201 @@ export class MemoryService implements IMemoryService {
         entities,
       };
     })();
+  }
+
+  /**
+   * Saves a session handoff and supersedes the project's previous active one.
+   *
+   * The goal and state are required: a handoff that cannot say what was being
+   * done and where it stopped is not continuity, it is noise.
+   */
+  public saveHandoff(input: HandoffInput): Handoff {
+    const goal = requireNonEmpty(input.goal, "Handoff goal");
+    const state = requireNonEmpty(input.state, "Handoff state");
+    const projectId =
+      input.projectId ?? input.project_id ?? this._currentProject.id;
+    const id = crypto.randomUUID();
+    const status = input.closed ? "closed" : "active";
+
+    this._db.transaction(() => {
+      if (!input.closed) {
+        this._db
+          .prepare(
+            `UPDATE handoffs
+             SET status = 'superseded', superseded_by = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE project_id = ? AND status = 'active'`
+          )
+          .run(id, projectId);
+      }
+      this._db
+        .prepare(
+          `INSERT INTO handoffs
+             (id, project_id, goal, state, status, agent, session_id, branch,
+              files_touched, open_questions, next_steps, decisions, blockers)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          projectId,
+          goal,
+          state,
+          status,
+          input.agent ?? null,
+          input.sessionId ?? input.session_id ?? null,
+          input.branch ?? null,
+          toJsonArray(input.filesTouched ?? input.files_touched),
+          toJsonArray(input.openQuestions ?? input.open_questions),
+          toJsonArray(input.nextSteps ?? input.next_steps),
+          toJsonArray(input.decisions),
+          toJsonArray(input.blockers)
+        );
+    })();
+
+    const created = this.getHandoff(id);
+    if (!created) {
+      throw new Error(`Failed to retrieve newly created handoff: ${id}`);
+    }
+    return created;
+  }
+
+  /** Returns one handoff by id, or null. */
+  public getHandoff(id: string): Handoff | null {
+    if (!id || !id.trim()) return null;
+    const row = this._db
+      .prepare<[string], HandoffRow>(
+        `SELECT id, project_id, goal, state, status, agent, session_id, branch,
+                files_touched, open_questions, next_steps, decisions, blockers,
+                created_at, updated_at
+         FROM handoffs WHERE id = ?`
+      )
+      .get(id.trim());
+    return row ? rowToHandoff(row) : null;
+  }
+
+  /** The handoff a new session should read first. */
+  public getActiveHandoff(projectId?: string): Handoff | null {
+    const target = projectId ?? this._currentProject.id;
+    const row = this._db
+      .prepare<[string], HandoffRow>(
+        `SELECT id, project_id, goal, state, status, agent, session_id, branch,
+                files_touched, open_questions, next_steps, decisions, blockers,
+                created_at, updated_at
+         FROM handoffs
+         WHERE project_id = ? AND status = 'active'
+         ORDER BY updated_at DESC, created_at DESC, rowid DESC
+         LIMIT 1`
+      )
+      .get(target);
+    return row ? rowToHandoff(row) : null;
+  }
+
+  /** Recent handoffs, newest first, bounded. */
+  public listHandoffs(options?: {
+    projectId?: string;
+    limit?: number | null;
+    includeSuperseded?: boolean | null;
+  }): Handoff[] {
+    const target = options?.projectId ?? this._currentProject.id;
+    const rawLimit = options?.limit;
+    const limit =
+      typeof rawLimit === "number" && Number.isFinite(rawLimit) && rawLimit > 0
+        ? Math.min(Math.floor(rawLimit), 200)
+        : 20;
+    const statusFilter = options?.includeSuperseded
+      ? ""
+      : " AND status = 'active'";
+    return this._db
+      .prepare<[string, number], HandoffRow>(
+        `SELECT id, project_id, goal, state, status, agent, session_id, branch,
+                files_touched, open_questions, next_steps, decisions, blockers,
+                created_at, updated_at
+         FROM handoffs
+         WHERE project_id = ?${statusFilter}
+         ORDER BY updated_at DESC, created_at DESC, rowid DESC
+         LIMIT ?`
+      )
+      .all(target, limit)
+      .map(rowToHandoff);
+  }
+
+  /** Marks the project's active handoff as closed. Returns whether one changed. */
+  public closeHandoff(projectId?: string): boolean {
+    const target = projectId ?? this._currentProject.id;
+    const result = this._db
+      .prepare(
+        `UPDATE handoffs
+         SET status = 'closed', updated_at = CURRENT_TIMESTAMP
+         WHERE project_id = ? AND status = 'active'`
+      )
+      .run(target);
+    return result.changes > 0;
+  }
+
+  /**
+   * Creates or replaces an observation with a deterministic id.
+   *
+   * This is what makes `muninn seed` idempotent: re-running it refreshes the
+   * seeded overview, architecture map, commands and ADRs instead of duplicating
+   * them on every run.
+   */
+  public upsertObservation(
+    input: SaveObservationInput & { id: string }
+  ): ObservationWithEntities {
+    const existing = this._db
+      .prepare<[string], { id: string }>(
+        "SELECT id FROM observations WHERE id = ?"
+      )
+      .get(input.id);
+    if (!existing) {
+      return this.saveObservation(input);
+    }
+    this._db
+      .prepare(
+        `UPDATE observations
+         SET title = ?, content = ?, category = ?, topic_key = ?, scope = ?,
+             agent = ?, session_id = ?, tags = ?, files = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      )
+      .run(
+        requireNonEmpty(input.title, "Observation title"),
+        input.content,
+        input.category as string,
+        input.topicKey ?? input.topic_key ?? null,
+        input.scope ?? "project",
+        input.agent ?? null,
+        input.sessionId ?? input.session_id ?? null,
+        toJsonArray(input.tags),
+        toJsonArray(input.files),
+        input.id
+      );
+    const observation = this.loadObservation(input.id);
+    if (!observation) {
+      throw new Error(`Failed to retrieve observation: ${input.id}`);
+    }
+    return observation;
+  }
+
+  private loadObservation(id: string): ObservationWithEntities | null {
+    const row = this._db
+      .prepare<[string], Observation>(
+        `SELECT id, project_id, category, title, content, topic_key, status,
+                superseded_by, scope, agent, session_id, tags, files,
+                created_at, updated_at
+         FROM observations WHERE id = ?`
+      )
+      .get(id);
+    if (!row) return null;
+    const entities = this._db
+      .prepare<[string], Entity>(
+        `SELECT e.id, e.project_id, e.entity_type, e.identifier, e.file_path
+         FROM entities e
+         JOIN observation_entities oe ON oe.entity_id = e.id
+         WHERE oe.observation_id = ?
+         ORDER BY e.identifier ASC`
+      )
+      .all(id);
+    return { ...row, entities };
   }
 
   /**
@@ -1533,14 +2085,9 @@ export class MemoryService implements IMemoryService {
       return [];
     }
 
-    if (rows.length === 0) {
-      return [];
-    }
-
     const obsIds = rows.map((r) => r.id);
     const entityMap = this._fetchEntitiesForObservations(obsIds);
-
-    return rows.map((r) => ({
+    const results: SearchResult[] = rows.map((r) => ({
       id: r.id,
       project_id: r.project_id,
       category: r.category,
@@ -1554,6 +2101,24 @@ export class MemoryService implements IMemoryService {
       rank: r.rank,
       entities: entityMap.get(r.id) ?? [],
     }));
+
+    if (options.includeGlobal || options.include_global) {
+      const seen = new Set(results.map((result) => result.id));
+      for (const observation of this.readGlobalObservations(
+        Math.min(limit, 10),
+        options.query,
+        options.category ?? null
+      )) {
+        if (seen.has(observation.id)) continue;
+        results.push({
+          ...observation,
+          rank: 1_000 + results.length,
+          entities: [],
+        });
+      }
+    }
+
+    return results;
   }
 
   /**
@@ -1613,14 +2178,9 @@ export class MemoryService implements IMemoryService {
 
     const rows = this._db.prepare<any[], Observation>(sql).all(...params);
 
-    if (rows.length === 0) {
-      return [];
-    }
-
     const obsIds = rows.map((r) => r.id);
     const entityMap = this._fetchEntitiesForObservations(obsIds);
-
-    return rows.map((r) => ({
+    const results: ObservationWithEntities[] = rows.map((r) => ({
       id: r.id,
       project_id: r.project_id,
       category: r.category,
@@ -1633,6 +2193,20 @@ export class MemoryService implements IMemoryService {
       updated_at: r.updated_at,
       entities: entityMap.get(r.id) ?? [],
     }));
+
+    if (options?.includeGlobal || options?.include_global) {
+      const seen = new Set(results.map((result) => result.id));
+      for (const observation of this.readGlobalObservations(
+        Math.min(limit, 10),
+        undefined,
+        options.category ?? null
+      )) {
+        if (seen.has(observation.id)) continue;
+        results.push({ ...observation, entities: [] });
+      }
+    }
+
+    return results;
   }
 
   /**
@@ -1967,14 +2541,14 @@ export class MemoryService implements IMemoryService {
   public syncToDisk(
     targetPath?: string,
     options?: { projectId?: string; allProjects?: boolean }
-  ): { path: string; count: number };
+  ): { path: string; count: number; handoffs: number };
   public syncToDisk(
     options?: { projectId?: string; allProjects?: boolean }
-  ): { path: string; count: number };
+  ): { path: string; count: number; handoffs: number };
   public syncToDisk(
     targetPathOrOptions?: string | { projectId?: string; allProjects?: boolean },
     optionsArg?: { projectId?: string; allProjects?: boolean }
-  ): { path: string; count: number } {
+  ): { path: string; count: number; handoffs: number } {
     let targetPath: string | undefined;
     let options: { projectId?: string; allProjects?: boolean } | undefined;
 
@@ -1996,9 +2570,7 @@ export class MemoryService implements IMemoryService {
         resolvedPath = path.resolve(root, targetPath);
       }
     } else {
-      const root =
-        this._currentProject.root_path || findGitRoot() || process.cwd();
-      resolvedPath = path.join(root, ".huginn", "memories.jsonl");
+      resolvedPath = this.memoryExportPath();
     }
 
     this.assertMemoryPath(resolvedPath, "write");
@@ -2015,7 +2587,8 @@ export class MemoryService implements IMemoryService {
     if (options?.allProjects === true) {
       observations = this._db
         .prepare<[], Observation>(
-          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
+          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by,
+                  scope, agent, session_id, tags, files, created_at, updated_at
            FROM observations
            ORDER BY created_at ASC`
         )
@@ -2032,7 +2605,8 @@ export class MemoryService implements IMemoryService {
     } else {
       observations = this._db
         .prepare<[string], Observation>(
-          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at
+          `SELECT id, project_id, category, title, content, topic_key, status, superseded_by,
+                  scope, agent, session_id, tags, files, created_at, updated_at
            FROM observations
            WHERE project_id = ?
            ORDER BY created_at ASC`
@@ -2075,6 +2649,48 @@ export class MemoryService implements IMemoryService {
       return JSON.stringify(record);
     });
 
+    // Handoffs travel with the snapshot: continuity is the point of a snapshot.
+    const handoffRows =
+      options?.allProjects === true
+        ? this._db
+            .prepare<[], HandoffRow>(
+              `SELECT id, project_id, goal, state, status, agent, session_id, branch,
+                      files_touched, open_questions, next_steps, decisions, blockers,
+                      created_at, updated_at
+               FROM handoffs ORDER BY created_at ASC`
+            )
+            .all()
+        : this._db
+            .prepare<[string], HandoffRow>(
+              `SELECT id, project_id, goal, state, status, agent, session_id, branch,
+                      files_touched, open_questions, next_steps, decisions, blockers,
+                      created_at, updated_at
+               FROM handoffs WHERE project_id = ? ORDER BY created_at ASC`
+            )
+            .all(targetProjectId);
+    for (const row of handoffRows) {
+      lines.push(
+        JSON.stringify({
+          type: "handoff",
+          id: row.id,
+          project_id: row.project_id,
+          goal: row.goal,
+          state: row.state,
+          status: row.status,
+          agent: row.agent,
+          session_id: row.session_id,
+          branch: row.branch,
+          files_touched: parseJsonArray(row.files_touched),
+          open_questions: parseJsonArray(row.open_questions),
+          next_steps: parseJsonArray(row.next_steps),
+          decisions: parseJsonArray(row.decisions),
+          blockers: parseJsonArray(row.blockers),
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+        })
+      );
+    }
+
     const tmpPath = `${resolvedPath}.tmp`;
     try {
       fs.writeFileSync(
@@ -2102,6 +2718,7 @@ export class MemoryService implements IMemoryService {
     return {
       path: resolvedPath,
       count: observations.length,
+      handoffs: handoffRows.length,
     };
   }
 
@@ -2122,9 +2739,7 @@ export class MemoryService implements IMemoryService {
         resolvedPath = path.resolve(root, sourcePath);
       }
     } else {
-      const root =
-        this._currentProject.root_path || findGitRoot() || process.cwd();
-      resolvedPath = path.join(root, ".huginn", "memories.jsonl");
+      resolvedPath = this.memoryExportPath();
     }
 
     this.assertMemoryPath(resolvedPath, "read");
@@ -2150,8 +2765,10 @@ export class MemoryService implements IMemoryService {
         "SELECT id FROM projects WHERE id = ?"
       );
       const insertObsStmt = this._db.prepare(
-        `INSERT INTO observations (id, project_id, category, title, content, topic_key, status, superseded_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO observations
+           (id, project_id, category, title, content, topic_key, status, superseded_by,
+            scope, agent, session_id, tags, files, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       const findEntityStmt = this._db.prepare<[string, string], Entity>(
         `SELECT id, project_id, entity_type, identifier, file_path
@@ -2166,6 +2783,13 @@ export class MemoryService implements IMemoryService {
         `INSERT OR IGNORE INTO observation_entities (observation_id, entity_id)
          VALUES (?, ?)`
       );
+      const insertHandoffStmt = this._db.prepare(
+        `INSERT OR IGNORE INTO handoffs
+           (id, project_id, goal, state, status, agent, session_id, branch,
+            files_touched, open_questions, next_steps, decisions, blockers,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
 
       for (const line of rawLines) {
         let record: any;
@@ -2175,9 +2799,52 @@ export class MemoryService implements IMemoryService {
           continue;
         }
 
+        if (!record || typeof record !== "object") {
+          continue;
+        }
+
+        if (record.type === "handoff") {
+          if (
+            typeof record.id !== "string" ||
+            !record.id.trim() ||
+            typeof record.goal !== "string" ||
+            typeof record.state !== "string"
+          ) {
+            continue;
+          }
+          const handoffProjectId =
+            typeof record.project_id === "string" &&
+            checkProjStmt.get(record.project_id)
+              ? record.project_id
+              : this._currentProject.id;
+          const status = ["active", "superseded", "closed"].includes(
+            String(record.status)
+          )
+            ? String(record.status)
+            : "active";
+          const result = insertHandoffStmt.run(
+            record.id,
+            handoffProjectId,
+            record.goal,
+            record.state,
+            status,
+            record.agent ?? null,
+            record.session_id ?? null,
+            record.branch ?? null,
+            toJsonArray(record.files_touched),
+            toJsonArray(record.open_questions),
+            toJsonArray(record.next_steps),
+            toJsonArray(record.decisions),
+            toJsonArray(record.blockers),
+            record.created_at ?? new Date().toISOString(),
+            record.updated_at ?? record.created_at ?? new Date().toISOString()
+          );
+          if (result.changes > 0) imported++;
+          else skipped++;
+          continue;
+        }
+
         if (
-          !record ||
-          typeof record !== "object" ||
           !(
             typeof record.id === "string" &&
             typeof record.title === "string" &&
@@ -2225,6 +2892,11 @@ export class MemoryService implements IMemoryService {
           topicKey,
           status,
           supersededBy,
+          record.scope === "global" ? "global" : "project",
+          record.agent ?? null,
+          record.session_id ?? record.sessionId ?? null,
+          record.tags ?? null,
+          record.files ?? null,
           createdAt,
           updatedAt
         );

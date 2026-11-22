@@ -8,6 +8,8 @@ import {
   readSessionBrief,
 } from "../service/memory-service.js";
 import { startMcpServer } from "../mcp/server.js";
+import { writeProjectMarker } from "../project/identity.js";
+import { handleHandoffCommand } from "./handoff.js";
 import { indexFilesIntoMuninn } from "../indexer/ast-indexer.js";
 import { sanitizeTerminalText } from "../util/text.js";
 
@@ -16,6 +18,7 @@ const IGNORED_INDEX_DIRS = new Set([
   ".git",
   ".harness",
   ".huginn",
+  ".muninn",
   "dist",
   "build",
   ".cache",
@@ -63,10 +66,11 @@ export function printMemoryUsage(): void {
 
 Usage:
   muninn memory init [--db <path>] [--project <path>]
-  muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>]
+  muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>] [--global]
   muninn memory sync [--import] [--file <path>] [--project <path>]
   muninn memory index [files...] [--project <path>] [--db <path>]
   muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
+  muninn memory handoff [status|--goal <t> --state <s>|--close]
 
 Subcommands:
   init     Initialize SQLite database and verify schema
@@ -74,6 +78,7 @@ Subcommands:
   sync     Export observations to disk (.jsonl) or import with --import
   index    Index AST symbols and dependencies into Muninn memory
   brief    Print a bounded read-only session brief (Markdown)
+  handoff  Save, read or close the session handoff ("where we left off")
 `);
 }
 
@@ -117,9 +122,28 @@ export async function handleMemoryCommand(
     const service = new MemoryService({ dbPath, projectRoot });
     try {
       const project = service.currentProject;
+      const uid = project.uid ?? service.projectUid;
       console.log(chalk.green("✔ Muninn memory database initialized"));
       console.log(`  Database: ${service.db.name}`);
       console.log(`  Project:  ${project.name} (${project.root_path})`);
+      console.log(`  UID:      ${uid}`);
+      // The committed marker is what makes the identity portable across clones,
+      // machines and agents. It is only written for a real project directory and
+      // a default (non-:memory:) database.
+      if (!args["--no-marker"] && dbPath === undefined) {
+        try {
+          const stat = fs.statSync(project.root_path);
+          if (stat.isDirectory()) {
+            const markerPath = writeProjectMarker(project.root_path, {
+              uid,
+              name: project.name,
+            });
+            console.log(`  Marker:   ${markerPath}`);
+          }
+        } catch {
+          // A read-only project still gets its memory; the marker is optional.
+        }
+      }
       console.log(`  Status:   Tables ready`);
     } finally {
       service.close?.();
@@ -156,6 +180,7 @@ export async function handleMemoryCommand(
         query: query.trim(),
         category,
         limit,
+        includeGlobal: Boolean(args["--global"]),
       });
 
       if (results.length === 0) {
@@ -195,6 +220,11 @@ export async function handleMemoryCommand(
     return;
   }
 
+  if (subcommand === "handoff") {
+    await handleHandoffCommand(args);
+    return;
+  }
+
   if (subcommand === "sync") {
     const syncPositional =
       positionals?.[0] ??
@@ -211,7 +241,7 @@ export async function handleMemoryCommand(
       if (isImport) {
         const result = service.importFromDisk(filePath);
         console.log(
-          `Imported ${result.imported} memories (skipped ${result.skipped} duplicates) from ${filePath ?? path.join(service.currentProject.root_path || process.cwd(), ".huginn", "memories.jsonl")}.`
+          `Imported ${result.imported} memories (skipped ${result.skipped} duplicates) from ${filePath ?? service.memoryExportPath()}.`
         );
       } else {
         const result = service.syncToDisk(filePath);

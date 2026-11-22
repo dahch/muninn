@@ -15,6 +15,11 @@ import {
   type Observation,
   type IMemoryService,
 } from "../src/service/memory-service.js";
+import {
+  memoryDbPath,
+  muninnHome,
+  resolveProjectContext,
+} from "../src/project/identity.js";
 
 describe("Muninn MemoryService & Persistence Engine", () => {
   let db: Database.Database;
@@ -1358,7 +1363,7 @@ describe("Muninn MemoryService & Persistence Engine", () => {
       expect(obs.find((o) => o.id === "bad-content-1")).toBeUndefined();
     });
 
-    it("syncToDisk defaults to .huginn/memories.jsonl in project root when no path is provided", () => {
+    it("syncToDisk defaults to the portable project snapshot when no path is provided", () => {
       service.saveObservation({
         category: "decision",
         title: "Default Sync Obs",
@@ -1366,13 +1371,11 @@ describe("Muninn MemoryService & Persistence Engine", () => {
       });
 
       const result = service.syncToDisk();
-      const expectedDefaultPath = path.join(
-        service.currentProject.root_path,
-        ".huginn",
-        "memories.jsonl"
-      );
+      const expectedDefaultPath = service.memoryExportPath();
       expect(result.path).toBe(expectedDefaultPath);
       expect(result.count).toBe(1);
+      expect(expectedDefaultPath.startsWith(muninnHome())).toBe(true);
+      expect(expectedDefaultPath.endsWith("memories.jsonl")).toBe(true);
       expect(fs.existsSync(expectedDefaultPath)).toBe(true);
     });
 
@@ -1591,7 +1594,8 @@ describe("Muninn MemoryService & Persistence Engine", () => {
       try {
         (service.currentProject as any).root_path = "";
         const syncRes = service.syncToDisk();
-        expect(syncRes.path).toContain(".huginn/memories.jsonl");
+        expect(syncRes.path).toBe(service.memoryExportPath());
+        expect(syncRes.path).toContain("memories.jsonl");
         if (fs.existsSync(syncRes.path)) {
           fs.unlinkSync(syncRes.path);
         }
@@ -1615,7 +1619,7 @@ describe("Muninn MemoryService & Persistence Engine", () => {
         }
 
         const syncDefaultRes = service.syncToDisk();
-        expect(syncDefaultRes.path).toBe(path.join(process.cwd(), ".huginn", "memories.jsonl"));
+        expect(syncDefaultRes.path).toBe(service.memoryExportPath());
         if (fs.existsSync(syncDefaultRes.path)) {
           fs.unlinkSync(syncDefaultRes.path);
         }
@@ -1673,7 +1677,9 @@ describe("MemoryService one-root attribution (ADR-49)", () => {
     const project = gitRepo("root");
     const service = new MemoryService({ projectRoot: project });
     try {
-      expect(service.db.name).toBe(path.join(project, ".huginn", "muninn.db"));
+      expect(service.db.name).toBe(
+        memoryDbPath(resolveProjectContext({ explicitRoot: project }).uid)
+      );
       expect(service.currentProject.root_path).toBe(project);
       // The database is not the one the process cwd would resolve to.
       expect(service.db.name).not.toBe(clientModule.resolveDatabasePath(undefined));
@@ -1682,17 +1688,18 @@ describe("MemoryService one-root attribution (ADR-49)", () => {
     }
   });
 
-  it("refuses a repository-shipped symlink for the memory export, both ways (SEC-006)", () => {
+  it("refuses a symlinked portable snapshot, both ways (SEC-006)", () => {
     const project = gitRepo("export");
-    fs.mkdirSync(path.join(project, ".huginn"), { recursive: true });
     const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "muninn-export-")));
     roots.push(outside);
     const victim = path.join(outside, "memories.jsonl");
     fs.writeFileSync(victim, '{"id":"outside"}\n');
-    fs.symlinkSync(victim, path.join(project, ".huginn", "memories.jsonl"));
 
     const service = new MemoryService({ projectRoot: project });
     try {
+      const exportPath = service.memoryExportPath();
+      fs.mkdirSync(path.dirname(exportPath), { recursive: true });
+      fs.symlinkSync(victim, exportPath);
       service.saveObservation({ category: "decision", title: "t", content: "c" });
       // Neither direction may travel through the link.
       expect(() => service.syncToDisk()).toThrow(/symlink/i);
@@ -2127,9 +2134,7 @@ describe("Decision lifecycle persistence and disk sync (REQ-4 / REQ-5)", () => {
 
     const result = service.syncToDisk({ allProjects: true });
     expect(result.count).toBe(2);
-    expect(result.path).toBe(
-      path.join(service.currentProject.root_path, ".huginn", "memories.jsonl")
-    );
+    expect(result.path).toBe(service.memoryExportPath());
 
     const records = fs
       .readFileSync(result.path, "utf-8")
