@@ -86,7 +86,7 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
       const response = await client.listTools();
       expect(response).toBeDefined();
       expect(response.tools).toBeInstanceOf(Array);
-      expect(response.tools).toHaveLength(8);
+      expect(response.tools).toHaveLength(13);
 
       const toolNames = response.tools.map((t) => t.name);
       expect(toolNames).toContain("muninn_save");
@@ -97,6 +97,11 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
       expect(toolNames).toContain("muninn_inspect_symbol");
       expect(toolNames).toContain("muninn_verify_contract");
       expect(toolNames).toContain("muninn_bootstrap");
+      expect(toolNames).toContain("muninn_handoff");
+      expect(toolNames).toContain("muninn_project");
+      expect(toolNames).toContain("muninn_explore");
+      expect(toolNames).toContain("muninn_graph");
+      expect(toolNames).toContain("muninn_code_search");
 
       // Verify static exports match
       expect(TOOL_NAMES).toEqual([
@@ -108,8 +113,13 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
         "muninn_inspect_symbol",
         "muninn_verify_contract",
         "muninn_bootstrap",
+        "muninn_handoff",
+        "muninn_project",
+        "muninn_explore",
+        "muninn_graph",
+        "muninn_code_search",
       ]);
-      expect(MUNINN_TOOLS).toHaveLength(8);
+      expect(MUNINN_TOOLS).toHaveLength(13);
     });
 
     it("verifies tool schemas have valid property structures and descriptions", async () => {
@@ -1159,6 +1169,57 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
             allProjects: null,
           })
         ).toEqual({ all_projects: true, allProjects: true });
+
+        // Some clients serialize numbers and booleans as strings.
+        expect(
+          normalizeArgs({
+            limit: "5",
+            budgetChars: "12000",
+            depth: " 2 ",
+            includeSuperseded: "true",
+            full: "false",
+            query: "12",
+          })
+        ).toEqual({
+          limit: 5,
+          budgetChars: 12000,
+          depth: 2,
+          includeSuperseded: true,
+          full: false,
+          query: "12",
+        });
+      });
+
+      it("accepts numeric and boolean arguments serialized as strings", async () => {
+        await client.callTool({
+          name: "muninn_save",
+          arguments: {
+            category: "decision",
+            title: "Coerced decision",
+            content: "String arguments must not break the call.",
+          },
+        });
+
+        const search = (await client.callTool({
+          name: "muninn_search",
+          arguments: { query: "Coerced", limit: "5", includeSuperseded: "false" },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        expect(search.isError).toBeFalsy();
+        const results = JSON.parse(search.content[0].text);
+        expect(results.length).toBeGreaterThanOrEqual(1);
+
+        const context = (await client.callTool({
+          name: "muninn_context",
+          arguments: { limit: "1", includeGlobal: "false" },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        expect(context.isError).toBeFalsy();
+
+        const bootstrap = (await client.callTool({
+          name: "muninn_bootstrap",
+          arguments: { budgetChars: "12000" },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        expect(bootstrap.isError).toBeFalsy();
+        expect(bootstrap.content[0].text).toContain("Session Brief");
       });
 
       it("hardens against prototype pollution by skipping __proto__, constructor, and prototype keys", () => {
@@ -1657,6 +1718,11 @@ describe("Muninn MCP Server (Model Context Protocol)", () => {
         "muninn_stats",
         "muninn_inspect_symbol",
         "muninn_bootstrap",
+        "muninn_handoff",
+        "muninn_project",
+        "muninn_explore",
+        "muninn_graph",
+        "muninn_code_search",
         "muninn_verify_contract",
       ]);
 
