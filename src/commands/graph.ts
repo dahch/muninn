@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import chalk from "chalk";
 import { MemoryService } from "../service/memory-service.js";
+import { plural } from "../util/plural.js";
 import {
   findImportCycles,
   findSymbol,
@@ -147,25 +148,25 @@ export async function handleIndexCommand(
     }
     console.log(
       chalk.green(
-        `✔ Indexed ${summary.changedFiles} changed file(s) of ${summary.indexedFiles} (${summary.symbols} symbols, ${summary.edges} edges) in ${summary.durationMs} ms`
+        `✔ Indexed ${plural(summary.changedFiles, "changed file")} of ${summary.indexedFiles} (${plural(summary.symbols, "symbol")}, ${plural(summary.edges, "edge")}) in ${summary.durationMs} ms`
       )
     );
     if (summary.removedFiles > 0) {
-      console.log(`  Removed ${summary.removedFiles} deleted file(s) from the graph.`);
+      console.log(`  Removed ${plural(summary.removedFiles, "deleted file")} from the graph.`);
     }
     if (summary.skippedFiles > 0) {
-      console.log(`  Skipped ${summary.skippedFiles} oversized file(s).`);
+      console.log(`  Skipped ${plural(summary.skippedFiles, "oversized file")}.`);
     }
     console.log(
       summary.preciseFiles > 0
-        ? `  Engine: ${summary.preciseFiles} file(s) via tree-sitter; TypeScript/JavaScript via the Compiler API`
+        ? `  Engine: ${plural(summary.preciseFiles, "file")} via tree-sitter; TypeScript/JavaScript via the Compiler API`
         : "  Engine: heuristic + Compiler API (install web-tree-sitter and @vscode/tree-sitter-wasm for Tier B)",
     );
     if (summary.truncated) {
       console.log(chalk.yellow("  Reached the file limit; index a subdirectory to cover the rest."));
     }
     console.log(
-      `  Graph: ${status.files} files, ${status.symbols} symbols, ${status.edges} edges`
+      `  Graph: ${plural(status.files, "file")}, ${plural(status.symbols, "symbol")}, ${plural(status.edges, "edge")}`
     );
     if (status.languages.length > 0) {
       console.log(

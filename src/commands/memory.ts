@@ -12,6 +12,7 @@ import { writeProjectMarker } from "../project/identity.js";
 import { handleHandoffCommand } from "./handoff.js";
 import { indexFilesIntoMuninn } from "../indexer/ast-indexer.js";
 import { sanitizeTerminalText } from "../util/text.js";
+import { plural } from "../util/plural.js";
 
 const IGNORED_INDEX_DIRS = new Set([
   "node_modules",
@@ -331,7 +332,7 @@ export async function handleMemoryCommand(
       });
       console.log(
         chalk.green(
-          `✔ Indexed ${result.indexedFiles} file(s) (${result.indexedSymbols} symbol(s), ${result.indexedDependencies} dependency link(s)) into Muninn memory.`
+          `✔ Indexed ${plural(result.indexedFiles, "file")} (${plural(result.indexedSymbols, "symbol")}, ${plural(result.indexedDependencies, "dependency link")}) into Muninn memory.`
         )
       );
     } finally {

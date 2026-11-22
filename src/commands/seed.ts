@@ -17,6 +17,7 @@ import {
   type ObservationCategory,
 } from "../service/memory-service.js";
 import { resolveProjectContext } from "../project/identity.js";
+import { plural } from "../util/plural.js";
 
 const SEED_AGENT = "muninn-seed";
 const MAX_FILE_BYTES = 256 * 1024;
@@ -510,7 +511,7 @@ export async function handleSeedCommand(
         console.log(JSON.stringify(records, null, 2));
         return;
       }
-      console.log(chalk.bold(`Would seed ${records.length} record(s):`));
+      console.log(chalk.bold(`Would seed ${plural(records.length, "record")}:`));
       for (const record of records) {
         console.log(`- [${record.category}] ${record.title} (${record.content.length} chars)`);
       }
@@ -523,7 +524,7 @@ export async function handleSeedCommand(
       return;
     }
     console.log(
-      chalk.green(`✔ Seeded ${result.written} record(s) into ${service.currentProject.name}`)
+      chalk.green(`✔ Seeded ${plural(result.written, "record")} into ${service.currentProject.name}`)
     );
     for (const record of result.records) {
       console.log(`- [${record.category}] ${record.title} (${record.chars} chars)`);

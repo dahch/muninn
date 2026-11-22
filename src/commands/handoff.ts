@@ -9,6 +9,7 @@
 import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 import { MemoryService, type Handoff } from "../service/memory-service.js";
+import { plural } from "../util/plural.js";
 
 function splitList(value: string | boolean | undefined): string[] {
   if (typeof value !== "string") return [];
@@ -162,7 +163,7 @@ export async function handleEndSessionCommand(
             `Session ended${branch ? ` on branch \`${branch}\`` : ""}.`,
             lastCommit ? `Last commit: \`${lastCommit}\`.` : "",
             files.length > 0
-              ? `${files.length} file(s) changed: ${files.slice(0, 20).join(", ")}${files.length > 20 ? ", …" : ""}.`
+              ? `${plural(files.length, "file")} changed: ${files.slice(0, 20).join(", ")}${files.length > 20 ? ", …" : ""}.`
               : "No uncommitted changes.",
           ]
             .filter(Boolean)
