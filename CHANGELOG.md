@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- **Portable project identity.** `.muninn/project.json` carries a stable uid; resolution falls back
+  to the Git remote and then the resolved path. `muninn project resolve|list|register|rename|forget`
+  manage it. Linked worktrees unify on the Git common root, and a `--project` subdirectory is
+  normalised to the real project root.
+- **Portable storage.** Memory now lives in `$MUNINN_HOME/projects/<uid>/memory.db` (default
+  `~/.muninn`), one file per project for Git and non-Git projects alike, plus a per-project
+  `memories.jsonl` snapshot. `MUNINN_LEGACY_STORAGE=1` restores the old layout.
+- **Non-destructive migration.** `muninn migrate [--from <db>] [--scan <dir>] [--dry-run]` moves
+  legacy `.huginn` databases into portable storage, remapping entities and links, idempotently and
+  without modifying the legacy files.
+- **Session handoffs.** A structured "where we left off" record (goal, state, files touched, next
+  steps, open questions, blockers, linked decisions), one active per project, superseding the
+  previous one. `muninn_handoff`, `muninn memory handoff` and `muninn end-session` write it, and
+  it renders first in every session brief.
+- **Deterministic seeding.** `muninn seed` extracts the README overview, build/test commands, a
+  language and directory map, agent conventions and every ADR into observations with stable ids, so
+  re-running refreshes them instead of duplicating them.
+- **Code graph.** New schema (`code_files`, `code_symbols`, `code_edges`, `code_index_state`, FTS
+  indexes) with line spans, signatures, docs, visibility, kinds and edge confidence. Incremental,
+  content-addressed indexing over Git's file list (or a `.gitignore`-aware walker), with deleted
+  files and dangling edges pruned.
+- **Multi-language extraction.** TypeScript/JavaScript use the Compiler API; every other supported
+  language gets a deterministic heuristic scan (imports, symbols, call sites).
+- **Graph tools.** `muninn_explore` (bounded source + callers + callees + related decisions),
+  `muninn_graph` (node, callers, callees, impact, implementations, imports, cycles, tests, files),
+  `muninn_code_search`, `muninn index` and `muninn graph` in the CLI.
+- **Activation.** The MCP `initialize` response now carries project-aware instructions, and
+  `muninn_project` can switch the active project when the working directory is not the project.
+- **`muninn doctor`.** Read-only diagnosis of the resolved project, memory, graph and every known
+  agent configuration, flagging missing, legacy (`huginn`), pinned and malformed entries.
+- Observation provenance: `agent`, `session_id`, `scope`, `tags` and `files`.
+
+- **Global memory.** scope "global" observations live in a cross-project store, appear in every
+  project brief under "Global preferences", and can be queried with includeGlobal.
+- **Repository snapshots.** muninn snapshot / muninn restore move memory between machines through a
+  deterministic .muninn/memory.jsonl, merging by observation id. Provenance travels too.
+- **Agent hooks.** muninn hook session-start prints the brief and muninn hook session-end writes the
+  handoff from git state, for agents that hook commands instead of MCP instructions.
+- **Watch mode.** muninn index --watch re-indexes changed files after a debounced quiet window.
+- **Better heuristic resolution.** Python relative/absolute imports resolve to files, calls are
+  attributed to their enclosing symbol, and module entry files (__init__, index, mod, main) are
+  tried per ecosystem.
+
+- **Claude Code hooks installer.** muninn hooks install merges session-start and session-end
+  commands into ~/.claude/settings.json, preserving unrelated settings and hook entries, idempotently
+  and with dry-run/status/uninstall. muninn doctor reports the hook state too.
+
+- **Optional tree-sitter Tier B.** When `web-tree-sitter` and `@vscode/tree-sitter-wasm` are
+  installed (optional dependencies), Python, Go, Rust, Java, C/C++, C#, Ruby, PHP and Bash are parsed
+  from a real AST with line spans and member qualification, resolving calls within a file and imports
+  to files. Without the pack, or with `MUNINN_TREESITTER=0` / `--no-treesitter`, the heuristic engine
+  runs exactly as before. The indexer is now asynchronous and reports how many files used Tier B.
+- **DSH Desktop catalog entry.** The setup catalog now lists dsh as a manual destination: setup
+  prints the dsh-mcp plugin steps instead of writing a config that DSH does not have, and doctor
+  detects whether the plugin is installed and recommends it.
+
+- **DSH session-aware project resolution.** With MUNINN_SESSION_AUTODETECT=dsh (set in the DSH
+  MCP declaration's env), the server follows the newest DSH session working directory and binds to
+  it when it is a project. When the session folder is a workspace with several repositories,
+  muninn_bootstrap lists the candidates and muninn_project use switches without editing config.
+
+### Fixed
+
+- `muninn_bootstrap` now follows the project pinned with `muninn_project { action: "use" }`. In a DSH
+  workspace it previously fell back to the server process's cwd (the DSH profile directory), so a
+  session that followed the guidance and pinned a project received an empty brief for the wrong
+  root.
+
+- **Tolerant MCP argument types.** Numeric and boolean tool arguments serialized as strings (for
+  example budgetChars="12000" or limit="5", a pattern produced by some agent clients) are coerced
+  before Zod validation instead of failing the call.
+- **DSH doctor detection.** muninn doctor recognises native @deepseek-ai/dsh-mcp-client declarations
+  in cordis.patch.yml (in addition to the dsh-mcp plugin) and reports the declared server names.
+
+### Changed
+
+- `muninn memory init` writes the committed project marker (disable with `--no-marker`).
+- The default JSONL snapshot moved from `<project>/.huginn/memories.jsonl` to the portable store.
+- The injected rules block now asks for a handoff before finishing and for the graph tools instead
+  of re-reading the repository.
+- `schema.sql` is at version 4 and migrations are tracked with `PRAGMA user_version`.
+
+
 ## 0.2.1
 
 ### Changed
