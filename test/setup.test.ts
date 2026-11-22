@@ -562,7 +562,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
   }
 
-  it("defines exactly the 13 reference destinations with routes, formats, and rules files", () => {
+  it("defines exactly the 14 reference destinations with routes, formats, and rules files", () => {
     expect(AGENT_IDS).toEqual([
       "cursor",
       "claude",
@@ -577,8 +577,9 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
       "omp",
       "mcode",
       "mimo",
+      "dsh",
     ]);
-    expect(new Set(AGENT_IDS).size).toBe(13);
+    expect(new Set(AGENT_IDS).size).toBe(14);
     expect(AGENT_REGISTRY.opencode).toMatchObject({
       label: "OpenCode",
       format: "opencode",
@@ -691,6 +692,13 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         mcpPaths: ["{home}/.config/mimocode/mimocode.json"],
         rulesFile: "AGENTS.md",
         executable: "mimo",
+      },
+      dsh: {
+        label: "DSH Desktop (dsh-mcp plugin)",
+        format: "manual",
+        mcpPaths: [],
+        rulesFile: "",
+        executable: null,
       },
     } as const;
 
@@ -1923,7 +1931,9 @@ describe("marked agent rules setup (Iteration 4)", () => {
       expect(content).toContain(MUNINN_RULES_END);
       expect(content).toContain("muninn_bootstrap");
       expect(content).toContain("muninn_search");
-      expect(content).toContain("muninn_inspect_symbol");
+      expect(content).toContain("muninn_explore");
+      expect(content).toContain("muninn_graph");
+      expect(content).toContain("muninn_handoff");
       // The block must ask for a write, not only for reads: memory that is
       // never recorded outside Huginn's cycle is not memory anyone inherits.
       expect(content).toContain("muninn_save");

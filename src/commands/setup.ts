@@ -122,6 +122,8 @@ function resolveRulesGroups(
 ): RulesGroup[] {
   const groups = new Map<string, RulesGroup>();
   for (const id of ids) {
+    // Manual destinations have no rules file to manage.
+    if (AGENT_REGISTRY[id].format === "manual") continue;
     const rulesPath = resolveRulesPath(id, { projectPath });
     const key = path.resolve(rulesPath);
     const existing = groups.get(key);
@@ -255,6 +257,13 @@ function printCatalog(projectPath: string | undefined, homeDir: string | undefin
     }
     console.log(`${target.id} — ${target.label}`);
     console.log(`  Format:  ${target.format}`);
+    if (target.format === "manual") {
+      console.log(
+        "  MCP:     manual — install the dsh-mcp plugin in the DSH profile, then add Muninn from its MCP UI",
+      );
+      console.log("  Rules:   n/a");
+      continue;
+    }
     console.log(`  MCP:     ${mcps.join(", ")}`);
     console.log(`  Rules:   ${resolveRulesPath(target, { projectPath })}`);
   }
@@ -345,6 +354,12 @@ export async function handleSetupCommand(
     const targets = selectedTargets(selection);
     if (selection !== undefined) warnMissingBinaries(targets);
     for (const target of targets) {
+      if (target.format === "manual") {
+        console.log(
+          `${target.label} (${target.id}): manual. Install the dsh-mcp plugin in the DSH profile, then add Muninn from its MCP UI.`,
+        );
+        continue;
+      }
       let paths: string[];
       try {
         paths = resolveMcpPaths(target, { projectPath, homeDir: home });
@@ -394,6 +409,12 @@ export async function handleSetupCommand(
     const targets = selectedTargets(selection);
     warnMissingBinaries(targets);
     for (const target of targets) {
+      if (target.format === "manual") {
+        console.log(
+          `${target.label} (${target.id}): manual. Install the dsh-mcp plugin in the DSH profile, then add Muninn from its MCP UI.`,
+        );
+        continue;
+      }
       let paths: string[];
       try {
         paths = resolveMcpPaths(target, { projectPath, homeDir: home });

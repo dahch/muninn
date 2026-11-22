@@ -9,7 +9,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 
-export type AgentFormat = "mcpServers" | "opencode" | "toml";
+export type AgentFormat = "mcpServers" | "opencode" | "toml" | "manual";
 
 export type AgentId =
   | "cursor"
@@ -24,7 +24,8 @@ export type AgentId =
   | "commandcode"
   | "omp"
   | "mcode"
-  | "mimo";
+  | "mimo"
+  | "dsh";
 
 export interface AgentTarget {
   id: AgentId;
@@ -157,6 +158,16 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     mcpPaths: ["{home}/.config/mimocode/mimocode.json"],
     rulesFile: "AGENTS.md",
     executable: "mimo",
+  },
+  dsh: {
+    id: "dsh",
+    label: "DSH Desktop (dsh-mcp plugin)",
+    format: "manual",
+    // DSH stores MCP servers in its plugin domain, not in a config file, so
+    // there is no path to merge; setup reports the manual steps instead.
+    mcpPaths: [],
+    rulesFile: "",
+    executable: null,
   },
 };
 
