@@ -27,7 +27,7 @@ import { handleRestoreCommand, handleSnapshotCommand } from "./commands/snapshot
 import { handleHookCommand } from "./commands/hook.js";
 import { handleHooksCommand } from "./commands/hooks.js";
 
-export const VERSION = "0.2.1";
+export const VERSION = "0.4.0";
 
 export interface ParsedArgs {
   [key: string]: string | boolean | undefined | string[];

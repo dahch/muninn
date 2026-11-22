@@ -1,6 +1,6 @@
 # Roadmap: Muninn as the portable memory + code graph for any agent
 
-> **Status: implemented in 0.3.0, with the gaps listed below.** This document started as the
+> **Status: implemented in 0.4.0, with the gaps listed below.** This document started as the
 > 0.2.1 audit and plan; it is kept as the record of what shipped and what remains. The current
 > contract is `SPEC.md` + `DESIGN.md` + ADR-19 to ADR-27.
 >
@@ -342,7 +342,7 @@ Synthetic TypeScript repository, 1,000 files / 3,000 symbols / 7,000 edges (sing
 
 Re-run with the same shape before changing the indexer; the numbers above are the regression floor.
 
-## 5c. Deployed on this machine (0.3.0)
+## 5c. Deployed on this machine (0.4.0)
 
 Legacy databases were migrated non-destructively and every active project was seeded and indexed
 with the built CLI against the real home directory (no agent configuration was modified, no project

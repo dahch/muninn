@@ -2,13 +2,13 @@
 
 Muninn is a standalone, local-first memory engine for coding agents and developers. It stores project observations in SQLite, supports lexical search and code-symbol indexing, and exposes memory operations through a library, CLI, and MCP server. It also provides read-only session bootstrap and bounded dependency-neighbor recovery. This specification adds autonomous setup for configuring Muninn in supported agents, including a portable MCP configuration and optional agent rules, without requiring Huginn.
 
-> **Implementation status (0.3.0):** setup is complete as described below. On top of it, 0.3 adds
+> **Implementation status (0.4.0):** setup is complete as described below. On top of it, 0.4 adds
 > portable project identity (`.muninn/project.json` + registry + `muninn project`), storage under
 > `$MUNINN_HOME/projects/<uid>/`, non-destructive migration from `.huginn`, session handoffs,
 > deterministic seeding, an incremental multi-language code graph (files, symbols, edges, FTS) with
 > `muninn_explore`/`muninn_graph`/`muninn_code_search`, MCP `initialize` instructions, and
 > `muninn doctor`, global preferences, snapshots/restore, hooks and watch mode. The requirements below
-> remain the base contract; the 0.3 additions are documented in [`ROADMAP.md`](./ROADMAP.md), in
+> remain the base contract; the 0.4 additions are documented in [`ROADMAP.md`](./ROADMAP.md), in
 > ADR-19 to ADR-27 and in `DESIGN.md` §8. See [`plan.md`](./plan.md) for the completed setup
 > iterations. Where a constraint below predates 0.3, it is annotated rather than silently dropped.
 
