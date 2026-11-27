@@ -1,5 +1,5 @@
 -- Muninn Engine Database Schema
--- Version 2.0.0 (user_version = 2)
+-- Version 5 (user_version = 5)
 
 -- Projects table
 CREATE TABLE IF NOT EXISTS projects (
@@ -43,13 +43,17 @@ CREATE INDEX IF NOT EXISTS idx_observations_project_id ON observations(project_i
 CREATE INDEX IF NOT EXISTS idx_observations_updated_at ON observations(updated_at);
 CREATE INDEX IF NOT EXISTS idx_observations_project_updated ON observations(project_id, updated_at DESC, created_at DESC);
 
--- Observations FTS5 virtual table
+-- Observations FTS5 virtual table.
+-- Porter stemming with diacritic folding: "verifying" matches "verify" and
+-- "sesion" matches "sesión". Substring recovery lives in observations_trigram
+-- so ranking keeps an exact tokenizer.
 CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
   title,
   content,
   topic_key,
   content='observations',
-  content_rowid='rowid'
+  content_rowid='rowid',
+  tokenize='porter unicode61 remove_diacritics 2'
 );
 
 -- Triggers for automatic FTS5 synchronization
@@ -68,6 +72,34 @@ CREATE TRIGGER IF NOT EXISTS obs_au AFTER UPDATE ON observations BEGIN
   VALUES ('delete', old.rowid, old.title, old.content, old.topic_key);
   INSERT INTO observations_fts(rowid, title, content, topic_key)
   VALUES (new.rowid, new.title, new.content, new.topic_key);
+END;
+
+
+-- Substring recovery (trigram) used only when the stemmed tokenizer finds
+-- nothing. FTS5 trigram matches any substring of three characters or more.
+CREATE VIRTUAL TABLE IF NOT EXISTS observations_trigram USING fts5(
+  title,
+  content,
+  content='observations',
+  content_rowid='rowid',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS obs_tri_ai AFTER INSERT ON observations BEGIN
+  INSERT INTO observations_trigram(rowid, title, content)
+  VALUES (new.rowid, new.title, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS obs_tri_ad AFTER DELETE ON observations BEGIN
+  INSERT INTO observations_trigram(observations_trigram, rowid, title, content)
+  VALUES ('delete', old.rowid, old.title, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS obs_tri_au AFTER UPDATE ON observations BEGIN
+  INSERT INTO observations_trigram(observations_trigram, rowid, title, content)
+  VALUES ('delete', old.rowid, old.title, old.content);
+  INSERT INTO observations_trigram(rowid, title, content)
+  VALUES (new.rowid, new.title, new.content);
 END;
 
 -- Entities table
@@ -170,6 +202,7 @@ CREATE TABLE IF NOT EXISTS code_files (
   bytes INTEGER,
   lines INTEGER,
   mtime_ms INTEGER,
+  ctime_ms INTEGER,
   is_test INTEGER NOT NULL DEFAULT 0,
   is_generated INTEGER NOT NULL DEFAULT 0,
   indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -194,6 +227,9 @@ CREATE TABLE IF NOT EXISTS code_symbols (
   is_exported INTEGER NOT NULL DEFAULT 0,
   parent_symbol_id TEXT,
   language TEXT,
+  -- Subword tokens (camelCase and snake_case split) so a search for "contract"
+  -- finds verifyTypeScriptContracts. Filled by the indexer.
+  search_tokens TEXT,
   UNIQUE(project_id, qualified_name)
 );
 
@@ -226,30 +262,43 @@ CREATE TABLE IF NOT EXISTS code_index_state (
   PRIMARY KEY(project_id, index_root, path)
 );
 
+-- One row per indexed worktree root: the cheap freshness fingerprint.
+CREATE TABLE IF NOT EXISTS code_index_roots (
+  project_id TEXT NOT NULL,
+  index_root TEXT NOT NULL,
+  head_sha TEXT,
+  indexed_at DATETIME,
+  indexer_version INTEGER,
+  files INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, index_root)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS code_symbols_fts USING fts5(
   name,
   qualified_name,
   signature,
   doc,
+  search_tokens,
   content='code_symbols',
-  content_rowid='rowid'
+  content_rowid='rowid',
+  tokenize='porter unicode61 remove_diacritics 2'
 );
 
 CREATE TRIGGER IF NOT EXISTS code_symbols_ai AFTER INSERT ON code_symbols BEGIN
-  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc)
-  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc);
+  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc, new.search_tokens);
 END;
 
 CREATE TRIGGER IF NOT EXISTS code_symbols_ad AFTER DELETE ON code_symbols BEGIN
-  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc)
-  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc);
+  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc, old.search_tokens);
 END;
 
 CREATE TRIGGER IF NOT EXISTS code_symbols_au AFTER UPDATE ON code_symbols BEGIN
-  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc)
-  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc);
-  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc)
-  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc);
+  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc, old.search_tokens);
+  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc, new.search_tokens);
 END;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS code_files_fts USING fts5(
