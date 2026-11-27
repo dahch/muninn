@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.5.0 — 2026-11-27
+## 0.5.0
 
-Muninn 0.5.0 is about **finding the memory you already have** and **trusting the graph you query**.
+Muninn 0.5.0 (2026-11-27) is about **finding the memory you already have** and **trusting the graph you query**.
 Search stopped being a strict keyword lookup, the code graph reports and refreshes its own freshness,
 the fixed cost of a session dropped by roughly a quarter, and setup stopped writing anything the user
 did not select.
