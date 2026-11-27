@@ -3,9 +3,12 @@ import path from "node:path";
 import chalk from "chalk";
 import {
   MemoryService,
-  MAX_SESSION_BRIEF_BUDGET,
   MAX_SESSION_BRIEF_PATHS,
+  SESSION_BRIEF_ALL_BUDGET,
+  SESSION_BRIEF_BUDGET_RULE,
   readSessionBrief,
+  resolveSessionBriefBudget,
+  type SessionBriefBudget,
 } from "../service/memory-service.js";
 import { startMcpServer } from "../mcp/server.js";
 import { writeProjectMarker } from "../project/identity.js";
@@ -70,7 +73,7 @@ Usage:
   muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>] [--global]
   muninn memory sync [--import] [--file <path>] [--project <path>]
   muninn memory index [files...] [--project <path>] [--db <path>]
-  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
+  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>|all] [--all] [--db <path>]
   muninn memory handoff [status|--goal <t> --state <s>|--close]
 
 Subcommands:
@@ -78,7 +81,8 @@ Subcommands:
   search   Search observations with BM25 relevance ranking
   sync     Export observations to disk (.jsonl) or import with --import
   index    Index AST symbols and dependencies into Muninn memory
-  brief    Print a bounded read-only session brief (Markdown)
+  brief    Print a bounded read-only session brief (Markdown; --all for the
+           complete brief past the 20,000-character numeric ceiling)
   handoff  Save, read or close the session handoff ("where we left off")
 `);
 }
@@ -275,23 +279,26 @@ export async function handleMemoryCommand(
       return;
     }
 
-    let budgetChars: number | undefined;
-    if (typeof args["--budget"] === "string") {
-      const parsedBudget = Number(args["--budget"]);
-      if (
-        !Number.isInteger(parsedBudget) ||
-        parsedBudget <= 0 ||
-        parsedBudget > MAX_SESSION_BRIEF_BUDGET
-      ) {
+    // One shared resolver: the CLI used to duplicate the ceiling check, so the
+    // error text could drift from the service and MCP schema.
+    let budgetChars: SessionBriefBudget | undefined;
+    const rawBudget =
+      typeof args["--budget"] === "string" ? args["--budget"] : undefined;
+    if (
+      args["--all"] === true ||
+      rawBudget?.trim().toLowerCase() === SESSION_BRIEF_ALL_BUDGET
+    ) {
+      budgetChars = SESSION_BRIEF_ALL_BUDGET;
+    } else if (rawBudget !== undefined) {
+      try {
+        budgetChars = resolveSessionBriefBudget(Number(rawBudget));
+      } catch {
         console.error(
-          chalk.red(
-            `Error: --budget must be a positive integer no greater than ${MAX_SESSION_BRIEF_BUDGET}.`
-          )
+          chalk.red(`Error: --budget must be ${SESSION_BRIEF_BUDGET_RULE}.`)
         );
         process.exitCode = 1;
         return;
       }
-      budgetChars = parsedBudget;
     }
 
     try {

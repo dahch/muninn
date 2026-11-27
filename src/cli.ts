@@ -48,6 +48,7 @@ const BOOLEAN_FLAGS = new Set([
   "--version",
   "--import",
   "--json",
+  "--all",
   "--no-marker",
   "--purge",
   "--close",
@@ -112,7 +113,7 @@ Usage:
   muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>]
   muninn memory sync [--import] [--file <path>] [--project <path>]
   muninn memory index [files...] [--project <path>] [--db <path>]
-  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>] [--db <path>]
+  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>|all] [--all] [--db <path>]
   muninn memory handoff [status|--goal <t> --state <s>|--close]
   muninn seed [--project <path>] [--dry-run] [--json]
   muninn index [--project <path>] [--full] [--watch] [--json] [--max-files <n>] [--no-treesitter]
@@ -120,7 +121,7 @@ Usage:
   muninn doctor [--project <path>] [--json]
   muninn snapshot [--project <path>] [--file <path>]
   muninn restore [--project <path>] [--file <path>]
-  muninn hook <session-start|session-end> [--project <path>] [--budget <n>]
+  muninn hook <session-start|session-end> [--project <path>] [--budget <n>|all] [--all] [--json]
   muninn hooks <status|install|uninstall> [--home <path>] [--dry-run] [--force]
   muninn end-session [--goal <t>] [--state <s>] [--next "a;b"] [--question "x;y"]
   muninn project resolve [path] [--json]

@@ -398,6 +398,15 @@ for very small budgets. Paths escaping the project root and invalid budgets are 
 read-only failures are converted to an empty brief with unavailable counts and a cause note instead
 of being thrown.
 
+`budgetChars: "all"` is the escape hatch for projects whose brief genuinely exceeds the numeric
+ceiling. It lifts the character budget and the per-section row limits (recent activity,
+related symbols, global preferences) and appends a deterministic `_Full brief: …_` footer with the
+rendered size and the row count of each section, so an uncapped render stays auditable. The
+truncation marker never advises raising `budgetChars` past a ceiling it cannot pass; it names the
+`"all"` value, `paths`, and `muninn_explore`. `resolveSessionBriefBudget` is the single resolver
+used by the service, the MCP schema, the CLI and the session-start hook — the hook no longer clamps
+a requested budget silently, and it defaults to the same 8,000 characters as every other surface.
+
 #### 9. `neighbors(identifier, { depth?, limit? }): SymbolNeighbors | null`
 
 Traverses the existing `entity_dependencies` graph from an entity resolved through the same exact,
@@ -569,7 +578,7 @@ The exported `MUNINN_TOOLS: Tool[]` array is dynamically generated from `TOOL_RE
 | `muninn_link_symbol` | `MuninnLinkSymbolSchema` | - `observationId`: Trimmed string, min 1 char<br>- `symbol`: String (min 1 char) or `SymbolSchema` object | `service.linkSymbol(input.observationId, input.symbol)` |
 | `muninn_stats` | `MuninnStatsSchema` | - `allProjects`: Optional boolean (default: false) | `service.getStats(allProjects ? undefined : currentProject.id)` |
 | `muninn_inspect_symbol` | `MuninnInspectSymbolSchema` | - `symbol`: Trimmed string, 1–2,000 chars<br>- `projectId` / `project_id`: Optional trimmed string | `service.inspectSymbol(symbol, projectId)` returning symbol definition, file location, incoming/outgoing dependencies, a bounded depth-1 neighbor traversal, and linked observations |
-| `muninn_bootstrap` | `MuninnBootstrapSchema` | - `paths`: Optional array of 1–20 trimmed path strings (max 4,096 chars each)<br>- `budgetChars` / `budget_chars`: Optional positive integer, max 20,000, default 8,000<br>- `expandGraph` / `expand_graph`: Optional boolean, default `true` | Read-only `readSessionBrief` (default server) or `service.getSessionBrief` (injected service); returns the shared Markdown directly rather than JSON |
+| `muninn_bootstrap` | `MuninnBootstrapSchema` | - `paths`: Optional array of 1–20 trimmed path strings (max 4,096 chars each)<br>- `budgetChars` / `budget_chars`: Optional positive integer, max 20,000, default 8,000, or `"all"` for the complete brief<br>- `all`: Optional boolean shorthand for `budgetChars: "all"`<br>- `expandGraph` / `expand_graph`: Optional boolean, default `true` | Read-only `readSessionBrief` (default server) or `service.getSessionBrief` (injected service); returns the shared Markdown directly rather than JSON |
 | `muninn_handoff` | `MuninnHandoffSchema` | `action`: `checkpoint` | `end` | `status` | `close`; goal and state validated when writing | `service.saveHandoff` / `getActiveHandoff`; renders the continuity record (§8.3) |
 | `muninn_project` | `MuninnProjectSchema` | `action`: `status` | `list` | `use` | `index`; optional `path`, `full` | Server-level handler: `use` pins the project and reopens the service, `index` refreshes the graph (§8.5) |
 | `muninn_explore` | `MuninnExploreSchema` | `question`, optional `paths`, `budget`, `limit` | `buildExplore`: budgeted Markdown with source, callers, callees and related decisions (ADR-23) |
@@ -741,12 +750,13 @@ flowchart TD
     ```
   - Calls `service.close?.()` in a mandatory `finally` block to release file locks.
 
-#### 5. `muninn memory brief [--project <path>] [--paths a,b] [--budget <n>]`
+#### 5. `muninn memory brief [--project <path>] [--paths a,b] [--budget <n>|all] [--all]`
 
 - **Purpose**: Prints the same bounded, deterministic session brief as the library and MCP tool.
 - **Workflow**:
-  - Parses comma-separated `--paths` (at most 20) and an optional positive integer `--budget`
-    (maximum 20,000; the service default is 8,000).
+  - Parses comma-separated `--paths` (at most 20) and an optional `--budget`: a positive integer
+    (maximum 20,000; the service default is 8,000) or `all`. `--all` is the boolean shorthand for
+    `--budget all`.
   - Calls `readSessionBrief({ dbPath, projectRoot, paths, budgetChars })` directly, without
     constructing a writable `MemoryService`.
   - Prints exactly `brief.markdown` to stdout. Missing/corrupt databases produce an empty,
@@ -1390,8 +1400,10 @@ scope. Because the file is inside the repository it can be committed and travel 
 
 ### 8.9 Hooks and watch mode
 
-muninn hook session-start prints the read-only brief and muninn hook session-end writes a handoff
-from the current branch, changed files and last commit. The contract is a command, so any agent with
+muninn hook session-start prints the read-only brief (shared 8,000-character default, `--budget`
+or `--all` accepted; an oversized numeric budget is rejected with the `"all"` remedy instead of
+being clamped) and muninn hook session-end writes a handoff from the current branch, changed files
+and last commit. The contract is a command, so any agent with
 a hook mechanism can use it without Muninn knowing that mechanism; MCP initialize instructions remain
 the default path. muninn index --watch debounces filesystem events (1.2 s quiet window), ignores
 dependency and cache directories, and runs the same incremental indexer, so the graph stays fresh

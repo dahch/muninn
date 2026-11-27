@@ -11,6 +11,9 @@ import {
   readSessionBrief,
   renderSessionBrief,
   MAX_SESSION_BRIEF_BUDGET,
+  DEFAULT_SESSION_BRIEF_BUDGET,
+  SESSION_BRIEF_ALL_BUDGET,
+  SESSION_BRIEF_RECENT_ACTIVITY_LIMIT,
   type SessionBrief,
 } from "../src/service/memory-service.js";
 import {
@@ -767,3 +770,178 @@ describe("Read-only session bootstrap (Iteration 2)", () => {
     }
   });
 });
+
+describe("Session brief budget escape hatch", () => {
+  let tempDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "muninn-brief-all-"));
+    dbPath = path.join(tempDir, ".huginn", "muninn.db");
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+    process.exitCode = 0;
+  });
+
+  /** Enough non-decision observations to overflow the per-section cap. */
+  function seedActivity(service: MemoryService, count: number): void {
+    for (let i = 1; i <= count; i += 1) {
+      service.saveObservation({
+        category: "discovery",
+        title: `Bulk discovery ${i}`,
+        content: `Payload number ${i} for the uncapped brief test.`,
+      });
+    }
+  }
+
+  it("keeps the numeric ceiling and points oversized budgets at the escape hatch", () => {
+    const service = new MemoryService({ dbPath, projectRoot: tempDir });
+    try {
+      expect(() =>
+        service.getSessionBrief({ budgetChars: MAX_SESSION_BRIEF_BUDGET + 1 })
+      ).toThrow(/"all" for the complete brief/);
+      expect(service.getSessionBrief().budgetChars).toBe(
+        DEFAULT_SESSION_BRIEF_BUDGET
+      );
+    } finally {
+      service.close();
+    }
+  });
+
+  it("renders the complete brief, lifting the per-section row caps, with budgetChars \"all\"", () => {
+    const service = new MemoryService({ dbPath, projectRoot: tempDir });
+    try {
+      const total = SESSION_BRIEF_RECENT_ACTIVITY_LIMIT + 5;
+      seedActivity(service, total);
+
+      const capped = service.getSessionBrief();
+      expect(capped.recentActivity).toHaveLength(
+        SESSION_BRIEF_RECENT_ACTIVITY_LIMIT
+      );
+
+      const full = service.getSessionBrief({
+        budgetChars: SESSION_BRIEF_ALL_BUDGET,
+      });
+      expect(full.budgetChars).toBe(SESSION_BRIEF_ALL_BUDGET);
+      expect(full.truncated).toBe(false);
+      expect(full.recentActivity).toHaveLength(total);
+      expect(full.markdown).toContain("Bulk discovery 1");
+      expect(full.markdown).toContain(`Bulk discovery ${total}`);
+      expect(full.markdown).not.toContain("[truncated");
+      // The footer makes an uncapped render auditable instead of unbounded and opaque.
+      expect(full.markdown).toMatch(/_Full brief: [\d,]+ characters/);
+      expect(full.markdown).toContain(`${total} recent observations`);
+      expect(renderSessionBrief(full)).toBe(full.markdown);
+      expect(full.markdown.length).toBeGreaterThan(
+        service.getSessionBrief({ budgetChars: MAX_SESSION_BRIEF_BUDGET })
+          .markdown.length
+      );
+    } finally {
+      service.close();
+    }
+  });
+
+  it("names a reachable way out in every truncation marker", () => {
+    const service = new MemoryService({ dbPath, projectRoot: tempDir });
+    try {
+      seedActivity(service, 30);
+      const brief = service.getSessionBrief({ budgetChars: 400 });
+      expect(brief.truncated).toBe(true);
+      expect(brief.markdown).toContain("showing 400 of");
+      expect(brief.markdown).toContain('pass budgetChars "all"');
+      expect(brief.markdown).toContain("numeric budgets cap at 20,000");
+      expect(brief.markdown).toContain("muninn_explore");
+      expect(brief.markdown).not.toContain("increase budgetChars");
+    } finally {
+      service.close();
+    }
+  });
+
+  it("accepts all through the MCP schema, aliases and server call", async () => {
+    expect(MuninnBootstrapSchema.safeParse({ all: true }).success).toBe(true);
+    expect(
+      MuninnBootstrapSchema.safeParse({ budgetChars: "all" }).success
+    ).toBe(true);
+    expect(
+      MuninnBootstrapSchema.safeParse({ budget_chars: "all" }).success
+    ).toBe(true);
+
+    const rejected = MuninnBootstrapSchema.safeParse({
+      budgetChars: MAX_SESSION_BRIEF_BUDGET + 1,
+    });
+    expect(rejected.success).toBe(false);
+    expect(
+      (rejected.error?.issues ?? []).map((issue) => issue.message).join(" ")
+    ).toContain('pass "all"');
+
+    expect(normalizeArgs({ budget_chars: "ALL" })).toMatchObject({
+      budgetChars: SESSION_BRIEF_ALL_BUDGET,
+    });
+    expect(normalizeArgs({ all: "true" })).toMatchObject({ all: true });
+
+    const service = new MemoryService({ dbPath, projectRoot: tempDir });
+    seedActivity(service, SESSION_BRIEF_RECENT_ACTIVITY_LIMIT + 5);
+    const server = createMcpServer(service);
+    const [serverTransport, clientTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client(
+      { name: "brief-all-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({
+        name: "muninn_bootstrap",
+        arguments: { all: true },
+      });
+      expect(callText(result)).toBe(
+        service.getSessionBrief({ budgetChars: SESSION_BRIEF_ALL_BUDGET })
+          .markdown
+      );
+      expect(callText(result)).toContain("_Full brief:");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("honors --all and --budget all in the CLI brief", async () => {
+    const service = new MemoryService({ dbPath, projectRoot: tempDir });
+    const total = SESSION_BRIEF_RECENT_ACTIVITY_LIMIT + 5;
+    seedActivity(service, total);
+    service.close();
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await handleMemoryCommand(
+        "brief",
+        { "--db": dbPath, "--project": tempDir, "--all": true },
+        []
+      );
+      const viaFlag = logSpy.mock.calls.map((call) => call.join(" ")).join("\n");
+      expect(viaFlag).toContain("_Full brief:");
+      expect(viaFlag).toContain(`Bulk discovery ${total}`);
+      expect(errorSpy).not.toHaveBeenCalled();
+
+      logSpy.mockClear();
+      await handleMemoryCommand(
+        "brief",
+        { "--db": dbPath, "--project": tempDir, "--budget": "all" },
+        []
+      );
+      expect(logSpy.mock.calls.map((call) => call.join(" ")).join("\n")).toBe(
+        viaFlag
+      );
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+});
+

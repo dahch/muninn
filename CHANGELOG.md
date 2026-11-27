@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A complete session brief on request.** `budgetChars: "all"` (MCP `all: true`, CLI and hook
+  `--all`, or `--budget all`) lifts the 20,000-character ceiling **and** the per-section row limits
+  (recent activity, related symbols, global preferences), so a large project is no longer stuck with
+  a permanently truncated brief. The uncapped render ends with a deterministic `_Full brief: …_`
+  footer stating its size and each section's row count.
+
+### Changed
+
+- **Truncation markers name a reachable way out.** The marker now reports rendered versus total
+  characters and points at `"all"`, `paths` or `muninn_explore`; the previous "increase budgetChars"
+  advice was impossible to follow at the ceiling that printed it.
+- **One budget resolver for every surface.** Service, MCP schema, CLI and the session-start hook now
+  share `resolveSessionBriefBudget`. `muninn hook session-start --budget 60000` is rejected with the
+  `"all"` remedy instead of being silently clamped to 20,000, and the hook defaults to 8,000
+  characters like every other surface instead of 4,000.
+
 ## 0.4.1
 
 ### Added

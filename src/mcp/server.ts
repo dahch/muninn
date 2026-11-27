@@ -15,7 +15,10 @@ import {
   MemoryService,
   VALID_CATEGORIES,
   MAX_SESSION_BRIEF_BUDGET,
+  DEFAULT_SESSION_BRIEF_BUDGET,
+  SESSION_BRIEF_ALL_BUDGET,
   readSessionBrief,
+  type SessionBriefBudget,
   type IMemoryService,
   type MemoryServiceOptions,
   type ObservationWithEntities,
@@ -299,6 +302,45 @@ export type MuninnInspectSymbolInput = z.infer<
 >;
 
 /**
+ * A session-brief budget: a numeric character limit, or `"all"` for the
+ * complete brief.
+ *
+ * Validation lives here as well as in the service because an MCP caller only
+ * sees the tool error: rejecting 20,001 with "pass \"all\"" is the whole point
+ * of the escape hatch, while a truncation marker alone leaves the caller stuck.
+ */
+const sessionBriefBudgetSchema = z
+  .union([z.literal(SESSION_BRIEF_ALL_BUDGET), z.number()])
+  .superRefine((value, ctx) => {
+    if (value === SESSION_BRIEF_ALL_BUDGET) return;
+    if (!Number.isInteger(value) || value <= 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: `budgetChars must be a positive integer or "${SESSION_BRIEF_ALL_BUDGET}"`,
+      });
+      return;
+    }
+    if (value > MAX_SESSION_BRIEF_BUDGET) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          `budgetChars cannot exceed ${MAX_SESSION_BRIEF_BUDGET}; ` +
+          `pass "${SESSION_BRIEF_ALL_BUDGET}" for the complete brief`,
+      });
+    }
+  });
+
+/** Resolve the budget fields of a bootstrap call into one normalized value. */
+function briefBudgetFromInput(input: {
+  all?: boolean | null;
+  budgetChars?: SessionBriefBudget | null;
+  budget_chars?: SessionBriefBudget | null;
+}): SessionBriefBudget | undefined {
+  if (input.all) return SESSION_BRIEF_ALL_BUDGET;
+  return input.budgetChars ?? input.budget_chars ?? undefined;
+}
+
+/**
  * Zod schema for muninn_bootstrap tool arguments.
  */
 export const MuninnBootstrapSchema = z.object({
@@ -309,26 +351,22 @@ export const MuninnBootstrapSchema = z.object({
     .describe(
       "Optional file or directory paths, relative to the project root or absolute inside it, used to select indexed symbols"
     ),
-  budgetChars: z
-    .number()
-    .int("budgetChars must be an integer")
-    .positive("budgetChars must be positive")
-    .max(
-      MAX_SESSION_BRIEF_BUDGET,
-      `budgetChars cannot exceed ${MAX_SESSION_BRIEF_BUDGET}`
-    )
+  budgetChars: sessionBriefBudgetSchema
     .nullish()
-    .describe("Maximum rendered Markdown length (default 8000, max 20000)"),
-  budget_chars: z
-    .number()
-    .int("budget_chars must be an integer")
-    .positive("budget_chars must be positive")
-    .max(
-      MAX_SESSION_BRIEF_BUDGET,
-      `budget_chars cannot exceed ${MAX_SESSION_BRIEF_BUDGET}`
-    )
+    .describe(
+      `Maximum rendered Markdown length: a positive integer up to ${MAX_SESSION_BRIEF_BUDGET}, or "${SESSION_BRIEF_ALL_BUDGET}" for the complete brief (default ${DEFAULT_SESSION_BRIEF_BUDGET})`
+    ),
+  budget_chars: sessionBriefBudgetSchema
     .nullish()
-    .describe("Maximum rendered Markdown length (default 8000, max 20000, snake_case)"),
+    .describe(
+      `Maximum rendered Markdown length: a positive integer up to ${MAX_SESSION_BRIEF_BUDGET}, or "${SESSION_BRIEF_ALL_BUDGET}" for the complete brief (default ${DEFAULT_SESSION_BRIEF_BUDGET}, snake_case)`
+    ),
+  all: z
+    .boolean()
+    .nullish()
+    .describe(
+      `Render the complete brief: shorthand for budgetChars "${SESSION_BRIEF_ALL_BUDGET}". Lifts the character budget and the per-section row limits`
+    ),
   expandGraph: z
     .boolean()
     .nullish()
@@ -674,7 +712,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
     handler: (service, input) =>
       service.getSessionBrief({
         paths: input.paths ?? undefined,
-        budgetChars: input.budgetChars ?? input.budget_chars,
+        budgetChars: briefBudgetFromInput(input),
         expandGraph: input.expandGraph ?? input.expand_graph,
       }).markdown,
   },
@@ -946,6 +984,7 @@ const NUMERIC_ARG_KEYS = new Set([
 ]);
 
 const BOOLEAN_ARG_KEYS = new Set([
+  "all",
   "allProjects",
   "all_projects",
   "includeSuperseded",
@@ -964,6 +1003,15 @@ function coerceArgumentValue(key: string, value: unknown): unknown {
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (NUMERIC_ARG_KEYS.has(key)) {
+      // "all" is a valid budget-value sentinel, not a number.
+      if (
+        (key === "budgetChars" ||
+          key === "budget_chars" ||
+          key === "budget") &&
+        trimmed.toLowerCase() === SESSION_BRIEF_ALL_BUDGET
+      ) {
+        return SESSION_BRIEF_ALL_BUDGET;
+      }
       if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
         return Number(trimmed);
       }
@@ -1485,7 +1533,7 @@ export function createMcpServer(
           projectRoot: autoRoot ?? activeProjectRoot ?? options?.projectRoot,
           db: options?.db,
           paths: input.paths ?? undefined,
-          budgetChars: input.budgetChars ?? input.budget_chars ?? undefined,
+          budgetChars: briefBudgetFromInput(input),
           expandGraph: input.expandGraph ?? input.expand_graph,
         });
         return {
