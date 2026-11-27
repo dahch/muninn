@@ -10,6 +10,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { symbolSearchTokens } from "../util/text.js";
 import type Database from "better-sqlite3";
 import {
   detectLanguage,
@@ -31,7 +33,7 @@ import type {
   IndexSummary,
 } from "./types.js";
 
-export const INDEXER_VERSION = 1;
+export const INDEXER_VERSION = 2;
 
 const SOURCE_EXTENSION_CANDIDATES = [
   "",
@@ -159,6 +161,7 @@ interface FileStateRow {
   path: string;
   content_hash: string;
   mtime_ms: number | null;
+  ctime_ms: number | null;
   bytes: number | null;
 }
 
@@ -192,6 +195,193 @@ function resolveCandidates(
   return null;
 }
 
+/** HEAD commit of a Git worktree, or `null` outside Git. */
+export function gitHeadSha(root: string): string | null {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return null;
+  const sha = result.stdout.trim();
+  return sha.length > 0 ? sha : null;
+}
+
+/** Indexable paths that `git status --porcelain` reports as dirty. */
+function dirtyGitFiles(root: string): string[] | null {
+  const result = spawnSync("git", ["status", "--porcelain", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.status !== 0) return null;
+  const entries = result.stdout.split("\0").filter(Boolean);
+  const dirty: string[] = [];
+  for (const entry of entries) {
+    const candidate = entry.slice(3).trim();
+    if (!candidate) continue;
+    const target = candidate.includes(" -> ")
+      ? candidate.split(" -> ").pop()!
+      : candidate;
+    const normalized = normalizePath(target.replace(/^"|"$/g, ""));
+    if (detectLanguage(normalized)) dirty.push(normalized);
+  }
+  return dirty;
+}
+
+interface StoredFingerprint {
+  path: string;
+  mtime_ms: number | null;
+  ctime_ms: number | null;
+  bytes: number | null;
+}
+
+/** Count stored files whose current stat no longer matches the indexed one. */
+function fingerprintDrift(
+  root: string,
+  rows: StoredFingerprint[],
+  paths?: string[]
+): number {
+  const wanted = paths ? new Set(paths) : null;
+  let drift = 0;
+  for (const row of rows) {
+    if (wanted && !wanted.has(row.path)) continue;
+    try {
+      const stat = fs.statSync(path.join(root, row.path));
+      if (
+        Math.floor(stat.mtimeMs) !== row.mtime_ms ||
+        Math.floor(stat.ctimeMs) !== row.ctime_ms ||
+        stat.size !== row.bytes
+      ) {
+        drift += 1;
+      }
+    } catch {
+      drift += 1;
+    }
+  }
+  return drift;
+}
+
+export interface IndexFreshness {
+  fresh: boolean;
+  reason: string;
+  indexRoot: string;
+  files: number;
+  staleFiles: number;
+  indexedAt: string | null;
+  ageSeconds: number | null;
+  indexerVersion: number | null;
+  headSha: string | null;
+  indexedHeadSha: string | null;
+}
+
+/**
+ * Cheap, bounded freshness check: a stored root fingerprint plus `git status`,
+ * never a full rescan. A non-Git project falls back to stat-ing the indexed
+ * files, which is linear in the number of already-indexed files only.
+ */
+export function checkIndexFreshness(
+  service: GraphServiceLike,
+  options?: IndexOptions
+): IndexFreshness {
+  const db = service.db;
+  const projectId = service.currentProject.id;
+  const root = path.resolve(options?.projectRoot ?? service.currentProject.root_path);
+  const indexRoot = normalizePath(root);
+  const status = getIndexStatus(service, { ...options, projectRoot: root });
+  let row:
+    | {
+        head_sha: string | null;
+        indexed_at: string | null;
+        indexer_version: number | null;
+        files: number;
+      }
+    | undefined;
+  try {
+    row = db
+      .prepare<
+        [string, string],
+        {
+          head_sha: string | null;
+          indexed_at: string | null;
+          indexer_version: number | null;
+          files: number;
+        }
+      >(
+        `SELECT head_sha, indexed_at, indexer_version, files
+         FROM code_index_roots WHERE project_id = ? AND index_root = ?`
+      )
+      .get(projectId, indexRoot);
+  } catch {
+    // A database created before v5 has no fingerprint table yet; the migration
+    // creates it on the next writable open. Report staleness from file state.
+    row = undefined;
+  }
+  const headSha = gitHeadSha(root);
+  const indexedAt = row?.indexed_at ?? status.indexedAt;
+  const ageSeconds = indexedAt
+    ? Math.max(
+        0,
+        Math.floor(
+          (Date.now() - new Date(indexedAt.replace(" ", "T") + "Z").getTime()) / 1000
+        )
+      )
+    : null;
+  const base = {
+    indexRoot,
+    files: status.files,
+    staleFiles: 0,
+    indexedAt,
+    ageSeconds: Number.isFinite(ageSeconds as number) ? ageSeconds : null,
+    indexerVersion: row?.indexer_version ?? status.indexerVersion,
+    headSha,
+    indexedHeadSha: row?.head_sha ?? null,
+  };
+
+  if (status.files === 0) {
+    return { ...base, fresh: false, reason: "the code graph is empty" };
+  }
+  if (base.indexerVersion !== INDEXER_VERSION) {
+    return {
+      ...base,
+      fresh: false,
+      reason: `the graph was built by indexer v${base.indexerVersion ?? 0}, current is v${INDEXER_VERSION}`,
+    };
+  }
+  const rows = db
+    .prepare<[string, string], StoredFingerprint>(
+      `SELECT path, mtime_ms, ctime_ms, bytes FROM code_files
+       WHERE project_id = ? AND index_root = ?`
+    )
+    .all(projectId, indexRoot);
+  const headMoved = Boolean(row?.head_sha && headSha && row.head_sha !== headSha);
+  const dirty = dirtyGitFiles(root);
+
+  let stale = 0;
+  if (dirty !== null) {
+    // A dirty worktree is not stale by itself: files edited after the last index
+    // are exactly what the previous run indexed. Compare their fingerprints, and
+    // treat an unindexed dirty path as a new file.
+    const indexed = new Set(rows.map((entry) => entry.path));
+    const unknown = dirty.filter((entry) => !indexed.has(entry));
+    stale = fingerprintDrift(root, rows, dirty) + unknown.length;
+    if (stale === 0 && headMoved) {
+      stale = fingerprintDrift(root, rows);
+    }
+  } else {
+    stale = fingerprintDrift(root, rows);
+  }
+
+  return {
+    ...base,
+    staleFiles: stale,
+    fresh: stale === 0,
+    reason:
+      stale === 0
+        ? "up to date"
+        : `${stale} file(s) changed since the last index`,
+  };
+}
+
 export async function indexProject(
   service: GraphServiceLike,
   options: IndexOptions = {}
@@ -210,53 +400,104 @@ export async function indexProject(
 
   const existingRows = db
     .prepare<[string, string], FileStateRow>(
-      `SELECT path, content_hash, mtime_ms, bytes
+      `SELECT path, content_hash, mtime_ms, ctime_ms, bytes
        FROM code_files WHERE project_id = ? AND index_root = ?`
     )
     .all(projectId, indexRoot);
   const existingByPath = new Map(existingRows.map((row) => [row.path, row]));
+  const stateVersions = new Map(
+    db
+      .prepare<[string, string], { path: string; indexer_version: number | null }>(
+        `SELECT path, indexer_version FROM code_index_state
+         WHERE project_id = ? AND index_root = ?`
+      )
+      .all(projectId, indexRoot)
+      .map((row) => [row.path, row.indexer_version])
+  );
 
   const discoveredPaths = new Set(discovered.files.map((file) => file.relativePath));
   const removed = existingRows
     .map((row) => row.path)
     .filter((existingPath) => !discoveredPaths.has(existingPath));
 
-  const toParse: Array<{ relativePath: string; absolutePath: string; hash: string; size: number; mtimeMs: number }> = [];
+  const toParse: Array<{
+    relativePath: string;
+    absolutePath: string;
+    hash: string;
+    size: number;
+    mtimeMs: number;
+    ctimeMs: number;
+    content: string;
+  }> = [];
+  // Files whose bytes did not change but whose fingerprint is stale: only the
+  // fast-path metadata is refreshed, no parse is needed.
+  const metadataOnly: Array<{
+    path: string;
+    mtimeMs: number;
+    ctimeMs: number;
+    size: number;
+  }> = [];
   for (const file of discovered.files) {
     const existing = existingByPath.get(file.relativePath);
-    const unchanged =
+    const stateVersion = stateVersions.get(file.relativePath);
+    const versionMatches =
+      stateVersion === undefined || stateVersion === INDEXER_VERSION;
+    const mtimeMs = Math.floor(file.mtimeMs);
+    const ctimeMs = Math.floor(file.ctimeMs);
+    const fastUnchanged =
       mode !== "full" &&
-      existing &&
-      existing.mtime_ms === Math.floor(file.mtimeMs) &&
+      versionMatches &&
+      existing !== undefined &&
+      existing.mtime_ms === mtimeMs &&
+      existing.ctime_ms === ctimeMs &&
       existing.bytes === file.size;
-    if (unchanged) continue;
+    if (fastUnchanged) continue;
     let content: string;
     try {
       content = fs.readFileSync(file.absolutePath, "utf8");
     } catch {
+      continue;
+    }
+    const hash = sha(content);
+    const sameBytes =
+      mode !== "full" &&
+      versionMatches &&
+      existing !== undefined &&
+      existing.content_hash === hash;
+    if (sameBytes) {
+      metadataOnly.push({
+        path: file.relativePath,
+        mtimeMs,
+        ctimeMs,
+        size: file.size,
+      });
       continue;
     }
     toParse.push({
       relativePath: file.relativePath,
       absolutePath: file.absolutePath,
-      hash: sha(content),
+      hash,
       size: file.size,
-      mtimeMs: Math.floor(file.mtimeMs),
+      mtimeMs,
+      ctimeMs,
+      content,
     });
   }
 
   // Parsing happens outside the transaction: a syntax error in one file must not
   // roll back the rest, and the transaction stays short.
-  const parsed: Array<{ relativePath: string; hash: string; size: number; mtimeMs: number; extracted: ExtractedFile }> = [];
+  const parsed: Array<{
+    relativePath: string;
+    hash: string;
+    size: number;
+    mtimeMs: number;
+    ctimeMs: number;
+    extracted: ExtractedFile;
+  }> = [];
   const preciseAvailable = await treeSitterAvailable();
   let preciseFiles = 0;
   for (const file of toParse) {
-    let content: string;
-    try {
-      content = fs.readFileSync(file.absolutePath, "utf8");
-    } catch {
-      continue;
-    }
+    const content = file.content;
     try {
       const precise = preciseAvailable
         ? await extractWithTreeSitter(file.relativePath, content)
@@ -277,6 +518,21 @@ export async function indexProject(
   let edgeCount = 0;
 
   db.transaction(() => {
+    for (const entry of metadataOnly) {
+      db.prepare(
+        `UPDATE code_files
+         SET mtime_ms = ?, ctime_ms = ?, bytes = ?, indexed_at = CURRENT_TIMESTAMP
+         WHERE project_id = ? AND index_root = ? AND path = ?`
+      ).run(
+        entry.mtimeMs,
+        entry.ctimeMs,
+        entry.size,
+        projectId,
+        indexRoot,
+        entry.path
+      );
+    }
+
     const deleteEdgesForIds = (ids: string[]): void => {
       if (ids.length === 0) return;
       for (const id of ids) {
@@ -307,14 +563,15 @@ export async function indexProject(
     const insertFile = db.prepare(
       `INSERT OR REPLACE INTO code_files
          (id, project_id, index_root, path, language, content_hash, bytes, lines,
-          mtime_ms, is_test, is_generated, indexed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+          mtime_ms, ctime_ms, is_test, is_generated, indexed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
     );
     const insertSymbol = db.prepare(
       `INSERT OR REPLACE INTO code_symbols
          (id, project_id, file_id, name, qualified_name, kind, start_line, end_line,
-          start_col, signature, doc, visibility, is_exported, parent_symbol_id, language)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          start_col, signature, doc, visibility, is_exported, parent_symbol_id,
+          language, search_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const insertEdge = db.prepare(
       `INSERT OR IGNORE INTO code_edges
@@ -350,6 +607,7 @@ export async function indexProject(
         entry.size,
         null,
         entry.mtimeMs,
+        entry.ctimeMs,
         isTestFile(entry.relativePath) ? 1 : 0,
         isGeneratedFile(entry.relativePath) ? 1 : 0
       );
@@ -375,7 +633,8 @@ export async function indexProject(
           symbol.visibility ?? null,
           symbol.isExported ? 1 : 0,
           null,
-          language
+          language,
+          symbolSearchTokens(symbol.name, qualified, symbol.signature ?? null)
         );
         symbolCount += 1;
       }
@@ -482,6 +741,18 @@ export async function indexProject(
            OR (dst_id IS NOT NULL AND dst_id NOT IN (SELECT id FROM code_files UNION SELECT id FROM code_symbols)))`
     ).run(projectId);
     changedFiles = parsed.length;
+
+    const totalFiles =
+      db
+        .prepare<[string, string], { count: number }>(
+          "SELECT count(*) AS count FROM code_files WHERE project_id = ? AND index_root = ?"
+        )
+        .get(projectId, indexRoot)?.count ?? 0;
+    db.prepare(
+      `INSERT OR REPLACE INTO code_index_roots
+         (project_id, index_root, head_sha, indexed_at, indexer_version, files)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)`
+    ).run(projectId, indexRoot, gitHeadSha(root), INDEXER_VERSION, totalFiles);
   })();
 
   return {

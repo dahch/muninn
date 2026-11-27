@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import type { CodeEdgeRow, CodeSymbolRow } from "./types.js";
+import { symbolSearchTokens } from "../util/text.js";
 
 export interface SymbolHit {
   symbol: CodeSymbolRow;
@@ -28,13 +29,32 @@ export interface GraphEdgeView {
 
 const MAX_EXPLORE_BUDGET = 20_000;
 
-export function sanitizeCodeQuery(query: string): string {
+export function expandCodeQueryTokens(query: string): string[] {
   const tokens = query
     .split(/[^\p{L}\p{N}_]+/u)
     .map((token) => token.trim())
     .filter((token) => token.length > 1 && token.length < 80)
     .slice(0, 12);
-  return tokens.map((token) => `"${token.replace(/"/g, "")}"`).join(" OR ");
+  const expanded = new Set<string>();
+  for (const token of tokens) {
+    expanded.add(token);
+    // Split camelCase/snake_case so "contract" reaches verifyTypeScriptContracts
+    // through the symbol's search_tokens column.
+    for (const part of symbolSearchTokens(token).split(" ")) {
+      if (part.length > 1) expanded.add(part);
+    }
+  }
+  return [...expanded].slice(0, 16);
+}
+
+/**
+ * Build the FTS expression for code search. The conjunction of every token is
+ * tried first by {@link searchSymbols}; this helper yields the OR fallback.
+ */
+export function sanitizeCodeQuery(query: string): string {
+  return expandCodeQueryTokens(query)
+    .map((token) => `"${token.replace(/"/g, "")}"*`)
+    .join(" OR ");
 }
 
 export function searchSymbols(
@@ -44,35 +64,56 @@ export function searchSymbols(
   options: { limit?: number | null; kind?: string | null; language?: string | null } = {}
 ): SymbolHit[] {
   const limit = Math.min(Math.max(Math.floor(options.limit ?? 20), 1), 100);
-  const ftsQuery = sanitizeCodeQuery(query);
+  const tokens = expandCodeQueryTokens(query);
   const kindFilter = options.kind ? " AND s.kind = ?" : "";
   const languageFilter = options.language ? " AND s.language = ?" : "";
 
-  if (ftsQuery) {
-    try {
-      const extra: Array<string | number> = [];
-      if (options.kind) extra.push(options.kind);
-      if (options.language) extra.push(options.language);
-      const rows = db
-        .prepare<Array<string | number>, CodeSymbolRow & { file_path: string; score: number }>(
-          `SELECT s.*, f.path AS file_path, bm25(code_symbols_fts) AS score
-           FROM code_symbols_fts
-           JOIN code_symbols s ON s.rowid = code_symbols_fts.rowid
-           JOIN code_files f ON f.id = s.file_id
-           WHERE code_symbols_fts MATCH ? AND s.project_id = ?${kindFilter}${languageFilter}
-           ORDER BY score ASC, s.qualified_name ASC
-           LIMIT ?`
-        )
-        .all(ftsQuery, projectId, ...extra, limit);
-      if (rows.length > 0) {
-        return rows.map((row) => ({
-          symbol: row,
-          file_path: row.file_path,
-          score: row.score,
-        }));
+  const runFts = (ftsQuery: string): Array<CodeSymbolRow & { file_path: string; score: number }> => {
+    const extra: Array<string | number> = [];
+    if (options.kind) extra.push(options.kind);
+    if (options.language) extra.push(options.language);
+    return db
+      .prepare<Array<string | number>, CodeSymbolRow & { file_path: string; score: number }>(
+        `SELECT s.*, f.path AS file_path, bm25(code_symbols_fts, 8.0, 4.0, 1.0, 1.0, 3.0) AS score
+         FROM code_symbols_fts
+         JOIN code_symbols s ON s.rowid = code_symbols_fts.rowid
+         JOIN code_files f ON f.id = s.file_id
+         WHERE code_symbols_fts MATCH ? AND s.project_id = ?${kindFilter}${languageFilter}
+         ORDER BY score ASC, s.qualified_name ASC
+         LIMIT ?`
+      )
+      .all(ftsQuery, projectId, ...extra, limit);
+  };
+
+  if (tokens.length > 0) {
+    // Conjunction first (precise), then the OR fallback only if it could not fill
+    // the page. Prefix expansion makes morphological variants and subwords reach
+    // the same symbol.
+    const tiers = [
+      tokens.map((token) => `"${token.replace(/"/g, "")}"*`).join(" "),
+      tokens.map((token) => `"${token.replace(/"/g, "")}"*`).join(" OR "),
+    ];
+    const collected: Array<CodeSymbolRow & { file_path: string; score: number }> = [];
+    const seen = new Set<string>();
+    for (const ftsQuery of tiers) {
+      if (collected.length >= limit) break;
+      try {
+        for (const row of runFts(ftsQuery)) {
+          if (seen.has(row.id)) continue;
+          seen.add(row.id);
+          collected.push(row);
+          if (collected.length >= limit) break;
+        }
+      } catch {
+        // Fall through to LIKE: a malformed FTS query must not break the tool.
       }
-    } catch {
-      // Fall through to LIKE: a malformed FTS query must not break the tool.
+    }
+    if (collected.length > 0) {
+      return collected.map((row) => ({
+        symbol: row,
+        file_path: row.file_path,
+        score: row.score,
+      }));
     }
   }
 
