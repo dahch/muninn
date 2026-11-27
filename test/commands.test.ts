@@ -61,6 +61,13 @@ describe("Muninn CLI Commands & Integration", () => {
       expect(parsed["--limit"]).toBe("5");
     });
 
+    it("treats --all as a boolean so it never swallows the next positional", () => {
+      const parsed = parseArgs(["memory", "brief", "--all", "--project", "/repo"]);
+      expect(parsed["--all"]).toBe(true);
+      expect(parsed["--project"]).toBe("/repo");
+      expect(parsed._positionals).toEqual(["brief"]);
+    });
+
     it("parses multiple positionals for sync import", () => {
       const parsed = parseArgs(["memory", "sync", "--import", "backup.jsonl"]);
       expect(parsed._command).toBe("memory");

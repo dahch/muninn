@@ -447,3 +447,35 @@ idempotent JSONL sync, writing `<project>/.muninn/memory.jsonl` for the user to 
 **Consequences:** Preferences survive across projects and restores keep their scope. The snapshot is
 merge-by-id, so it is not a conflict-resolution protocol, and committing it puts memory under review
 like any other file. The per-project database remains the source of truth.
+
+## ADR-28: An explicit uncapped brief, not a higher numeric ceiling
+
+**Status:** Implemented.
+
+**Context:** The session brief capped `budgetChars` at 20,000 characters, and its truncation marker
+said "increase budgetChars to see the rest" while printing that marker precisely when the ceiling was
+reached, so the advice was impossible to follow. Two further caps made the ceiling the wrong lever:
+recent activity was limited to 20 rows, related symbols to 50 and global preferences to 8 regardless
+of the character budget, so even a larger number could not return the complete brief. The surfaces
+also disagreed: the service, the MCP schema and the CLI each validated the budget separately, and the
+session-start hook clamped any request to 20,000 silently and defaulted to 4,000 instead of 8,000 —
+a caller asking for 60,000 received a shorter brief with no indication that its request had been
+rewritten.
+
+**Decision:** Keep 20,000 as the numeric ceiling and default 8,000 everywhere, and add an explicit
+`budgetChars: "all"` mode (boolean alias `all: true`, CLI and hook `--all`, `--budget all`) that lifts
+both the character budget and the per-section row limits and appends a deterministic diagnostics
+footer with the rendered size and section row counts. Resolve budgets through one shared
+`resolveSessionBriefBudget`, used by the service, the MCP schema, the CLI and the hook; no surface
+clamps silently. The truncation marker reports rendered versus total characters and names reachable
+options (`"all"`, `paths`, `muninn_explore`) instead of advising a value that is already at its
+maximum.
+
+**Consequences:** An unbounded brief is always an explicit request, so the default context cost does
+not change, and a hard ceiling no longer leaves a caller without a way to read everything. The
+per-section limits remain the documented default behavior and are bypassed only on this path; the
+neighbor traversal's public 50-neighbor clamp still applies outside it. Large renders are the
+caller's responsibility, which is why the footer makes their size and composition visible. The
+numeric ceiling is intentionally not raised: a bigger arbitrary number would not have removed the
+per-section caps and would have hidden the same dead end behind a longer brief.
+

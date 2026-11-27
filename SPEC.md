@@ -130,12 +130,14 @@ are flagged so affected tests can be reported). TypeScript and JavaScript shall 
 - Paths outside the project root are not used to select symbols.
 - Symbol selection uses indexed file paths only and does not scan the repository.
 
-**REQ-11 — Render deterministic Markdown within a character budget.** The shared brief renderer shall produce deterministic Markdown and enforce a positive integer `budgetChars`, default 8,000 and maximum 20,000, over the complete output, including headings, notes, and a visible truncation marker.
+**REQ-11 — Render deterministic Markdown within a character budget.** The shared brief renderer shall produce deterministic Markdown and enforce a positive integer `budgetChars`, default 8,000 and maximum 20,000, over the complete output, including headings, notes, and a visible truncation marker. A caller that needs more than the numeric ceiling shall pass `budgetChars: "all"`, which removes the character budget and the per-section row limits and appends a diagnostics footer stating the rendered size and the rows each section contributed.
 
 **AC-11**
 - Identical brief data and options produce identical Markdown.
-- Invalid, non-positive, or non-integer budgets are rejected.
-- Rendered output does not exceed the selected character budget.
+- Invalid, non-positive, or non-integer budgets are rejected with a message that names the `"all"` escape hatch.
+- Rendered output does not exceed the selected numeric budget; `"all"` output is never truncated.
+- The truncation marker states the rendered and total character counts and a reachable way to obtain the rest (`"all"`, `paths`, or `muninn_explore`).
+- Numeric overrides above 20,000 are rejected rather than silently clamped, and every surface (service, MCP, CLI, hook) resolves budgets through the same function.
 
 **REQ-12 — Provide MCP and CLI bootstrap surfaces.** `muninn_bootstrap` and `muninn memory brief [--project <path>] [--paths a,b] [--budget <n>]` shall return the shared renderer output. The default MCP server shall not initialize a writable database merely to serve bootstrap.
 

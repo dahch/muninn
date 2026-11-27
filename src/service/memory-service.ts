@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { assertDocPath } from "../util/path-safety.js";
+import { plural } from "../util/plural.js";
 import {
   deriveProjectUid,
   globalMemoryDbPath,
@@ -198,6 +199,24 @@ export const DEFAULT_SESSION_BRIEF_BUDGET = 8_000;
 export const MAX_SESSION_BRIEF_BUDGET = 20_000;
 export const MAX_SESSION_BRIEF_PATHS = 20;
 export const SESSION_BRIEF_RECENT_ACTIVITY_LIMIT = 20;
+/**
+ * Opt-in escape hatch past every brief cap.
+ *
+ * `MAX_SESSION_BRIEF_BUDGET` keeps the default brief small, but a large project
+ * can legitimately hold more than 20,000 characters of decisions and history.
+ * Without this value the ceiling would be a dead end: the truncation marker told
+ * callers to raise `budgetChars`, and raising it failed. "all" removes the
+ * character budget and the per-section row limits, and appends a diagnostics
+ * footer so the full render stays auditable.
+ */
+export const SESSION_BRIEF_ALL_BUDGET = "all";
+export type SessionBriefBudget = number | typeof SESSION_BRIEF_ALL_BUDGET;
+/**
+ * The user-facing rule for a brief budget, shared by the CLI and the hook so
+ * their flag errors cannot drift from the service or MCP schema.
+ */
+export const SESSION_BRIEF_BUDGET_RULE =
+  `a positive integer no greater than ${MAX_SESSION_BRIEF_BUDGET}, or "${SESSION_BRIEF_ALL_BUDGET}" for the complete brief`;
 
 export const DEFAULT_NEIGHBOR_DEPTH = 1;
 export const MAX_NEIGHBOR_DEPTH = 2;
@@ -238,7 +257,8 @@ export interface SymbolNeighbors {
 
 export interface SessionBriefOptions {
   paths?: string[] | null;
-  budgetChars?: number | null;
+  /** A character limit, or `"all"` for the complete, uncapped brief. */
+  budgetChars?: SessionBriefBudget | null;
   expandGraph?: boolean | null;
 }
 
@@ -284,7 +304,7 @@ export interface SessionBriefContent {
   globalObservations?: Observation[];
   counts: SessionBriefCounts;
   notes: string[];
-  budgetChars: number;
+  budgetChars: SessionBriefBudget;
 }
 
 export interface SessionBrief extends SessionBriefContent {
@@ -499,14 +519,28 @@ function sessionBriefError(err: unknown): string {
   return message || "unknown error";
 }
 
-function resolveSessionBriefBudget(value: number | null | undefined): number {
+/**
+ * The single source of truth for a brief budget, shared by the service, the MCP
+ * schema, the CLI and the session-start hook.
+ *
+ * Every surface used to resolve this independently, which is how the hook ended
+ * up silently clamping a requested 60,000 to 20,000. Rejecting an oversized
+ * numeric budget here is intentional: the error names the `"all"` escape hatch
+ * instead of leaving the caller with a truncation marker they cannot satisfy.
+ */
+export function resolveSessionBriefBudget(
+  value: SessionBriefBudget | null | undefined
+): SessionBriefBudget {
+  if (value === SESSION_BRIEF_ALL_BUDGET) return SESSION_BRIEF_ALL_BUDGET;
   const budget = value ?? DEFAULT_SESSION_BRIEF_BUDGET;
-  if (!Number.isInteger(budget) || budget <= 0) {
-    throw new Error("budgetChars must be a positive integer");
+  if (typeof budget !== "number" || !Number.isInteger(budget) || budget <= 0) {
+    throw new Error(
+      `budgetChars must be a positive integer or "${SESSION_BRIEF_ALL_BUDGET}"`
+    );
   }
   if (budget > MAX_SESSION_BRIEF_BUDGET) {
     throw new Error(
-      `budgetChars cannot exceed ${MAX_SESSION_BRIEF_BUDGET} characters`
+      `budgetChars cannot exceed ${MAX_SESSION_BRIEF_BUDGET} characters; pass "${SESSION_BRIEF_ALL_BUDGET}" for the complete brief`
     );
   }
   return budget;
@@ -730,13 +764,17 @@ function resolveNeighborDepth(value: number | null | undefined): number {
   return Math.min(depth, MAX_NEIGHBOR_DEPTH);
 }
 
-function resolveNeighborLimit(value: number | null | undefined): number {
+function resolveNeighborLimit(
+  value: number | null | undefined,
+  allowUnbounded = false
+): number {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return DEFAULT_NEIGHBOR_LIMIT;
   }
   const limit = Math.floor(value);
   if (limit < 1) return DEFAULT_NEIGHBOR_LIMIT;
-  return Math.min(limit, MAX_NEIGHBOR_LIMIT);
+  // Only the complete-brief path opts out of the public 50-neighbor cap.
+  return allowUnbounded ? limit : Math.min(limit, MAX_NEIGHBOR_LIMIT);
 }
 
 interface NeighborEdgeRow extends Entity {
@@ -747,10 +785,11 @@ function collectNeighbors(
   db: Database.Database,
   root: Entity,
   depthValue?: number | null,
-  limitValue?: number | null
+  limitValue?: number | null,
+  options?: { unboundedLimit?: boolean }
 ): SymbolNeighbors {
   const depth = resolveNeighborDepth(depthValue);
-  const limit = resolveNeighborLimit(limitValue);
+  const limit = resolveNeighborLimit(limitValue, options?.unboundedLimit);
   const visited = new Set<string>([root.id]);
   const flat: SymbolNeighbor[] = [];
   let frontier: Entity[] = [root];
@@ -1029,15 +1068,37 @@ function buildSessionBriefMarkdown(content: SessionBriefContent): string {
   return lines.join("\n").trimEnd();
 }
 
+/** Locale-independent thousands grouping: the marker must be byte-stable. */
+function groupDigits(value: number): string {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * The marker always offers a way out. The previous wording ("increase
+ * budgetChars to see the rest") was a dead end once the numeric ceiling was
+ * reached, which is exactly where it was printed.
+ */
+function truncationMarker(budgetChars: number, totalChars: number): string {
+  return (
+    `\n\n[truncated: showing ${groupDigits(budgetChars)} of ${groupDigits(totalChars)} characters; ` +
+    `numeric budgets cap at ${groupDigits(MAX_SESSION_BRIEF_BUDGET)} — ` +
+    `pass budgetChars "${SESSION_BRIEF_ALL_BUDGET}" for the complete brief, ` +
+    `narrow it with paths, or use muninn_explore]`
+  );
+}
+
 function applySessionBriefBudget(
   markdown: string,
-  budgetChars: number
+  budgetChars: SessionBriefBudget
 ): { markdown: string; truncated: boolean } {
+  if (budgetChars === SESSION_BRIEF_ALL_BUDGET) {
+    return { markdown, truncated: false };
+  }
   if (markdown.length <= budgetChars) {
     return { markdown, truncated: false };
   }
 
-  const marker = `\n\n[truncated: output limited to ${budgetChars} characters; increase budgetChars to see the rest]`;
+  const marker = truncationMarker(budgetChars, markdown.length);
   if (budgetChars <= marker.length) {
     // Use a compact marker in small budgets so some useful content still fits.
     // Even a one-character budget must remain bounded and visibly clipped.
@@ -1070,10 +1131,49 @@ function applySessionBriefBudget(
  * against `content.budgetChars`.
  */
 export function renderSessionBrief(content: SessionBriefContent): string {
-  return applySessionBriefBudget(
-    buildSessionBriefMarkdown(content),
-    content.budgetChars
-  ).markdown;
+  return renderSessionBriefWithStatus(content).markdown;
+}
+
+/**
+ * The renderer plus whether the budget actually clipped the output, so the
+ * service can report `truncated` without rendering twice.
+ */
+function renderSessionBriefWithStatus(content: SessionBriefContent): {
+  markdown: string;
+  truncated: boolean;
+} {
+  const body = buildSessionBriefMarkdown(content);
+  if (content.budgetChars === SESSION_BRIEF_ALL_BUDGET) {
+    return {
+      markdown: `${body}\n\n${sessionBriefDiagnostics(content, body.length)}`,
+      truncated: false,
+    };
+  }
+  return applySessionBriefBudget(body, content.budgetChars);
+}
+
+/**
+ * An uncapped brief is still diagnosable: the footer states how much was
+ * rendered and how many rows each section contributes, so a caller that asked
+ * for "all" can tell a complete brief from a suspiciously short one.
+ */
+function sessionBriefDiagnostics(
+  content: SessionBriefContent,
+  characters: number
+): string {
+  const decisions =
+    content.activeDecisions.keyed.reduce(
+      (total, group) => total + group.decisions.length,
+      0
+    ) + content.activeDecisions.unkeyed.length;
+  return [
+    `_Full brief: ${groupDigits(characters)} characters of content`,
+    plural(decisions, "active decision"),
+    plural(content.recentActivity.length, "recent observation"),
+    plural(content.symbols.length, "indexed symbol"),
+    plural(content.related.length, "related symbol"),
+    plural(content.globalObservations?.length ?? 0, "global preference"),
+  ].join(" · ") + "_";
 }
 
 function assembleSessionBrief(
@@ -1081,10 +1181,13 @@ function assembleSessionBrief(
   project: SessionBriefProject,
   projectId: string | null,
   selectedPaths: string[],
-  budgetChars: number,
+  budgetChars: SessionBriefBudget,
   notes: string[],
   expandGraph: boolean = true
 ): SessionBrief {
+  // "all" lifts every cap, not just the character budget: a caller asking for
+  // the complete brief must not silently lose the tail of each section either.
+  const unbounded = budgetChars === SESSION_BRIEF_ALL_BUDGET;
   let counts: SessionBriefCounts = {
     observations: 0,
     entities: 0,
@@ -1159,15 +1262,18 @@ function assembleSessionBrief(
       exclusion = ` AND id NOT IN (${listedDecisionIds.map(() => "?").join(",")})`;
       activityParams.push(...listedDecisionIds);
     }
-    activityParams.push(String(SESSION_BRIEF_RECENT_ACTIVITY_LIMIT));
+    let activityLimit = "";
+    if (!unbounded) {
+      activityLimit = " LIMIT ?";
+      activityParams.push(String(SESSION_BRIEF_RECENT_ACTIVITY_LIMIT));
+    }
     recentActivity = db
       .prepare<string[], Observation>(
         `SELECT id, project_id, category, title, content, topic_key, status,
                 superseded_by, created_at, updated_at
          FROM observations
          WHERE project_id = ?${exclusion}
-         ORDER BY updated_at DESC, created_at DESC, rowid DESC
-         LIMIT ?`
+         ORDER BY updated_at DESC, created_at DESC, rowid DESC${activityLimit}`
       )
       .all(...activityParams);
 
@@ -1199,18 +1305,22 @@ function assembleSessionBrief(
       // "Indexed Symbols", so listing it again would spend the brief's budget
       // on a duplicate and read like a second, different symbol.
       const listedSymbolIds = new Set(symbols.map((symbol) => symbol.id));
+      const relatedLimit = unbounded
+        ? Number.MAX_SAFE_INTEGER
+        : SESSION_BRIEF_RELATED_LIMIT;
       let traversedNeighbor = false;
       for (const symbol of symbols) {
-        if (relatedById.size >= SESSION_BRIEF_RELATED_LIMIT) break;
+        if (relatedById.size >= relatedLimit) break;
         const traversal = collectNeighbors(
           db,
           symbol,
           DEFAULT_NEIGHBOR_DEPTH,
-          SESSION_BRIEF_RELATED_LIMIT
+          relatedLimit,
+          { unboundedLimit: unbounded }
         );
         for (const neighbor of traversal.neighbors) {
           traversedNeighbor = true;
-          if (relatedById.size >= SESSION_BRIEF_RELATED_LIMIT) break;
+          if (relatedById.size >= relatedLimit) break;
           if (listedSymbolIds.has(neighbor.entity.id)) continue;
           if (!relatedById.has(neighbor.entity.id)) {
             relatedById.set(neighbor.entity.id, neighbor);
@@ -1269,8 +1379,7 @@ function assembleSessionBrief(
                   created_at, updated_at
            FROM observations
            WHERE scope = 'global' AND status = 'active'
-           ORDER BY updated_at DESC, created_at DESC, rowid DESC
-           LIMIT 8`
+           ORDER BY updated_at DESC, created_at DESC, rowid DESC${unbounded ? "" : " LIMIT 8"}`
         )
         .all();
     } finally {
@@ -1292,10 +1401,7 @@ function assembleSessionBrief(
     notes,
     budgetChars,
   };
-  const rendered = applySessionBriefBudget(
-    buildSessionBriefMarkdown(content),
-    budgetChars
-  );
+  const rendered = renderSessionBriefWithStatus(content);
   return {
     ...content,
     truncated: rendered.truncated,
@@ -1306,7 +1412,7 @@ function assembleSessionBrief(
 function buildUnavailableSessionBrief(
   rootPath: string,
   selectedPaths: string[],
-  budgetChars: number,
+  budgetChars: SessionBriefBudget,
   cause: unknown,
   projectRow?: Project
 ): SessionBrief {
@@ -1331,10 +1437,7 @@ function buildUnavailableSessionBrief(
     notes,
     budgetChars,
   };
-  const rendered = applySessionBriefBudget(
-    buildSessionBriefMarkdown(content),
-    budgetChars
-  );
+  const rendered = renderSessionBriefWithStatus(content);
   return {
     ...content,
     truncated: rendered.truncated,
