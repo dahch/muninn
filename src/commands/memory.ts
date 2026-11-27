@@ -73,7 +73,8 @@ Usage:
   muninn memory search <query> [--category <cat>] [--limit <n>] [--project <path>] [--global]
   muninn memory sync [--import] [--file <path>] [--project <path>]
   muninn memory index [files...] [--project <path>] [--db <path>]
-  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>|all] [--all] [--db <path>]
+  muninn memory brief [--project <path>] [--paths a,b] [--budget <n>|all] [--all] [--full] [--db <path>]
+  muninn memory dedup [--dry-run] [--project <path>] [--db <path>] [--json]
   muninn memory handoff [status|--goal <t> --state <s>|--close]
 
 Subcommands:
@@ -84,6 +85,7 @@ Subcommands:
   brief    Print a bounded read-only session brief (Markdown; --all for the
            complete brief past the 20,000-character numeric ceiling)
   handoff  Save, read or close the session handoff ("where we left off")
+  dedup    Mark redundant observations superseded (seeded copies, identical bodies)
 `);
 }
 
@@ -152,6 +154,45 @@ export async function handleMemoryCommand(
       console.log(`  Status:   Tables ready`);
     } finally {
       service.close?.();
+    }
+    return;
+  }
+
+  if (subcommand === "dedup") {
+    const service = new MemoryService({ dbPath, projectRoot });
+    try {
+      const report = service.dedupObservations({
+        dryRun: Boolean(args["--dry-run"]),
+      });
+      if (args["--json"]) {
+        console.log(JSON.stringify(report, null, 2));
+        return;
+      }
+      if (report.superseded === 0) {
+        console.log(chalk.green("✔ No redundant observations found."));
+        return;
+      }
+      const verb = report.dryRun ? "would supersede" : "superseded";
+      console.log(
+        chalk.green(
+          `✔ ${verb} ${report.superseded} redundant observation(s) in ${report.groups} group(s)`
+        )
+      );
+      for (const entry of report.entries.slice(0, 20)) {
+        console.log(
+          chalk.dim(
+            `  - ${entry.title} (${entry.reason}); kept ${entry.kept}, ${report.dryRun ? "would hide" : "hid"} ${entry.superseded}`
+          )
+        );
+      }
+      if (report.entries.length > 20) {
+        console.log(chalk.dim(`  … ${report.entries.length - 20} more`));
+      }
+      if (report.dryRun) {
+        console.log(chalk.dim("  Dry run: nothing was written."));
+      }
+    } finally {
+      service.close?.(true);
     }
     return;
   }
@@ -307,6 +348,7 @@ export async function handleMemoryCommand(
         projectRoot,
         paths,
         budgetChars,
+        detail: args["--full"] === true ? "full" : undefined,
       });
       console.log(brief.markdown);
     } catch (err: unknown) {
