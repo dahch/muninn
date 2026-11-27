@@ -1,67 +1,119 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-27
+
+Muninn 0.5.0 is about **finding the memory you already have** and **trusting the graph you query**.
+Search stopped being a strict keyword lookup, the code graph reports and refreshes its own freshness,
+the fixed cost of a session dropped by roughly a quarter, and setup stopped writing anything the user
+did not select.
+
+Measured on a copy of a real project database (61 observations, 625 symbols, 11.5k edges): recall on
+ten representative agent questions rose from 3/10 to 10/10, a default search page dropped from about
+2,800 to 760 tokens (worst case 872), the advertised tool schemas from 16,472 to 9,989 characters, and
+the brief from 8,011 truncated characters to 4,984 complete ones.
 
 ### Added
 
-- **A complete session brief on request.** `budgetChars: "all"` (MCP `all: true`, CLI and hook
-  `--all`, or `--budget all`) lifts the 20,000-character ceiling **and** the per-section row limits
-  (recent activity, related symbols, global preferences), so a large project is no longer stuck with
-  a permanently truncated brief. The uncapped render ends with a deterministic `_Full brief: …_`
-  footer stating its size and each section's row count.
-- **Tiered lexical search (ADR-29).** `muninn_search` now runs an exact conjunction first, adds a
-  prefix-expanded `OR` fallback only when that page is incomplete, and finally a trigram substring
-  tier. Natural-language recall on the measured query set rises from 3/10 to 10/10 while path,
-  symbol and phrase queries keep their precision. A new `match: "all"` option restores strict
-  conjunction behavior.
-- **Compact tool results (ADR-29).** `muninn_search` and `muninn_context` return identity, rank and a
-  90-character excerpt by default, with at most five linked entity identifiers; `detail: "full"`
-  returns whole bodies. A default ten-result page drops from about 2.8k to about 0.8k tokens.
-- **Lexical index v2 (ADR-30).** Schema v5 rebuilds the memory index with
-  `porter unicode61 remove_diacritics 2`, adds a trigram recovery table, and indexes camelCase and
-  snake_case subwords for code symbols, so `contract` finds `verifyTypeScriptContracts`.
-- **Graph freshness everywhere (ADR-31).** A `code_index_roots` fingerprint, `git status` probing and
-  a per-file stat fallback feed a STALE line in the session brief, a `freshness` field in
-  `muninn_project status`, a warning in `muninn doctor`, and a debounced, bounded auto-index before
-  graph-reading MCP tools (`MUNINN_AUTO_INDEX=0` disables it).
-- **`muninn hook after-edit`** refreshes the code graph incrementally from any agent's hook mechanism,
-  is a no-op without a Muninn database, and is installed in Claude Code's `Stop` event.
-- **Adapter descriptors (ADR-32).** Catalog entries declare `rulesStrategy` (`dedicated`,
-  `marked-block`, `none`) and a hook installer descriptor. Claude's rules move to a dedicated
-  `.claude/rules/muninn.md`; `muninn hooks install` accepts `--agent <id>` and `--scope user|project`;
-  `muninn doctor` reports rules and hook state per agent from the catalog.
-- **`muninn memory dedup`** collapses redundant memory: a `muninn-seed` extract that shares its
-  title with a session record, or two observations with identical title and body, are marked
-  `superseded` (never deleted) and point at the row that was kept. `--dry-run` reports first.
-- **Summary-first session brief (ADR-33).** `muninn_bootstrap` renders a bounded map by default
-  (`detail: "summary"`): fewer decisions, short gists, and a count of the omitted ones. `detail:
-  "full"` restores the previous rendering, and the uncapped `budgetChars: "all"` mode implies it.
-
-- **Setup installs only what you select.** `muninn setup --components mcp,rules,portable|all` chooses
-  the destination set explicitly; `--no-rules` and `--no-portable` narrow it further, and hooks stay
-  a separate opt-in (`muninn hooks install`). Nothing the user did not ask for is written.
+- **Tiered lexical search (ADR-29).** Every query runs as three tiers over the same FTS index: the
+  historical conjunction, a prefix-expanded disjunction when that page is incomplete, and a trigram
+  substring tier when both are empty. `match: "all"` keeps the strict conjunction. *Why:* FTS5
+  `MATCH` is a conjunction, so questions such as "how do we keep the graph updated after edits"
+  returned nothing and the agent fell back to re-reading the repository — exactly the cost Muninn
+  exists to remove. The fallback rows are appended with monotonically worse ranks, so a weaker match
+  never outranks a complete one.
+- **Compact results and curated tool schemas (ADR-29).** `muninn_search` and `muninn_context` return
+  identity, rank, a 90-character excerpt and at most five entity identifiers by default; `detail:
+  "full"` returns whole bodies. The advertised schemas drop per-tool banners, alias prose and fields a
+  model does not need to choose a call. *Why:* bodies average about 1.1k characters, so a ten-result
+  page cost roughly 2.8k tokens of mostly unread text, and every session paid about 4.1k tokens for
+  tool metadata before the first prompt. Validation still uses the full Zod schema, so no capability
+  was removed.
+- **Lexical index v2 (ADR-30).** Schema v5 rebuilds the memory index with `porter unicode61
+  remove_diacritics 2`, adds a trigram recovery table, and indexes camelCase/snake_case subwords for
+  symbols, so `contract` reaches `verifyTypeScriptContracts`. *Why:* `verifying` never matched
+  `verify`, `sesion` never matched `sesión`, and a camelCase identifier was a single opaque token.
+- **Reported freshness with automatic refresh (ADR-31).** A `code_index_roots` fingerprint, `git
+  status` probing and a per-file stat fallback feed a STALE line in the session brief, a `freshness`
+  field in `muninn_project status`, warnings in `muninn doctor`, and a debounced, bounded incremental
+  refresh before graph-reading MCP tools (`MUNINN_AUTO_INDEX=0` disables it). *Why:* the graph is
+  derived state; in the measured project it was five days old with 9 of 62 files changed, so every
+  graph answer described a different commit.
+- **`muninn hook after-edit` (ADR-31).** Any agent that can run a command after edits can refresh the
+  graph. It is a no-op in a project without a Muninn database and is installed in Claude Code's
+  `Stop` event, once per turn. *Why:* rules files are advisory and most agents expose no hook; one
+  process per turn is cheap, a process per edit is not.
+- **Catalog-driven activation (ADR-32).** Catalog entries declare a rules strategy (`dedicated`,
+  `marked-block`, `none`) and, where the agent exposes one, a hook installer descriptor. Claude's
+  rules move to a dedicated `.claude/rules/muninn.md`; `muninn hooks install` takes `--agent` and
+  `--scope user|project`; `muninn doctor` derives rules and hook probes from the catalog. *Why:*
+  ADR-26 states that no agent is privileged, yet the implementation appended to the shared
+  `CLAUDE.md` and hardcoded `~/.claude/settings.json`, while Devin already received a dedicated file.
+  Claude now gets its best supported configuration without being special-cased in code.
+- **`muninn memory dedup`.** Supersedes a `muninn-seed` extract that shares its title with a session
+  record, and any observations with identical title and body. It never deletes rows. *Why:* 14 active
+  title groups were duplicated (seed extract versus session record), crowding search results and the
+  brief.
+- **Summary-first session brief (ADR-33).** The brief keeps the handoff, a bounded gist per decision
+  (ten by default, with a count of the omitted ones), a few recent activities and the graph freshness
+  line. `detail: "full"` renders everything, and `budgetChars: "all"` implies it. *Why:* the brief
+  spent its entire 8,000-character budget on full bodies and was still truncated.
+- **`muninn setup --components mcp,rules,portable|all` (ADR-34).** Select what is installed; an empty
+  or unknown selection is a usage error, and hooks remain a separate opt-in command. *Why:* setup
+  wrote the portable file and the rules alongside the MCP entry, so the only choices were "everything"
+  or `--no-*`, and the cost was invisible.
+- **A complete session brief on request (ADR-28).** `budgetChars: "all"` (MCP `all: true`, CLI and hook
+  `--all`) lifts the 20,000-character ceiling and the per-section row limits, then ends with a
+  deterministic footer reporting the size and each section's row count. *Why:* the previous
+  truncation advice ("increase budgetChars") was impossible to follow at the ceiling that printed it.
 
 ### Changed
 
-- **Truncation markers name a reachable way out.** The marker now reports rendered versus total
-  characters and points at `"all"`, `paths` or `muninn_explore`; the previous "increase budgetChars"
-  advice was impossible to follow at the ceiling that printed it.
-- **One budget resolver for every surface.** Service, MCP schema, CLI and the session-start hook now
-  share `resolveSessionBriefBudget`. `muninn hook session-start --budget 60000` is rejected with the
-  `"all"` remedy instead of being silently clamped to 20,000, and the hook defaults to 8,000
-  characters like every other surface instead of 4,000.
-- The advertised MCP tool schemas drop per-tool banners, alias prose and fields a model does not need
-  to choose a call, cutting the fixed per-session schema cost from 16.5k to about 10k characters.
-  Snake_case aliases keep working through argument normalization.
-- Incremental indexing requires a matching `INDEXER_VERSION`, compares `content_hash` when the
-  fingerprint changes, and refreshes only the fingerprint when the bytes are identical.
+- `muninn_search` is smart by default; the strict conjunction is `match: "all"`.
+- Search and context return compact records by default; `detail: "full"` preserves the previous shape.
+- The session brief is summary-first; complete rendering is opt-in and implied by `"all"`.
+- Setup writes only the selected components; the default remains the full set, now visible.
+- Repository artifacts are written in English, and the rule is recorded in `AGENTS.md` and the
+  contributing guide (documentation only, no runtime effect).
 
 ### Fixed
 
-- Reindexing now detects a file whose bytes changed even when its mtime and size were preserved, and
-  re-parses everything after an indexer upgrade or a worktree commit change.
-- A failed FTS query no longer triggers the fallback tiers, which previously could mask a broken index.
-- Symbol search reaches subwords of identifiers instead of requiring the full token.
+- **`SQLITE_CORRUPT_VTAB` while migrating to schema v5.** Backfilling `code_symbols.search_tokens`
+  with the old FTS triggers active emitted `delete` commands with `NULL` values against an index being
+  replaced. The migration now drops the triggers and the index, backfills, and only then recreates the
+  table and triggers and rebuilds.
+- **A just-indexed graph could report itself stale.** `git status` is dirty in any normal session, so
+  counting dirty entries marked a fresh index stale. Dirty paths are now compared against their stored
+  mtime/ctime/size fingerprints; an unindexed dirty path is a new file, and a moved HEAD triggers a
+  scan instead of being stale by itself.
+- **Reindexing missed mtime-preserving rewrites and indexer upgrades.** The incremental check used
+  mtime and size only, `content_hash` was computed but never compared, and `INDEXER_VERSION` was
+  written but never read. It now requires a matching version and compares hashes, refreshing only the
+  fingerprint when the bytes are identical.
+- **A failed FTS query could be masked by the fallback tiers.** Tier fallback now stops when the
+  primary query errors, instead of silently substituting a weaker answer.
+- **Symbol search could not reach subwords.** `verifyTypeScriptContracts` was one token; the indexer
+  now writes camelCase/snake_case subwords and search tries a conjunction first with a prefix-`OR`
+  fallback.
+- **The brief's truncation marker gave unreachable advice** (ADR-28); it now names `"all"`, `paths`
+  and `muninn_explore`, and reports rendered versus total characters.
+
+### Upgrading
+
+1. Install 0.5.0 and restart any agent that holds a Muninn MCP server process; the running process
+   keeps the old tool schemas in memory.
+2. Run `muninn index --project <root>` once per project. The first writable open migrates the database
+   to schema v5 and the index refresh follows. `muninn memory brief` and `muninn doctor` are read-only,
+   so they keep reporting the old indexer version until then.
+3. Optional: `muninn memory dedup --dry-run`, then `muninn memory dedup`.
+4. Claude Code only: `muninn setup --agent claude --components rules --project <root>` writes
+   `.claude/rules/muninn.md`. Remove the old `<!-- muninn:rules:start -->` …
+   `<!-- muninn:rules:end -->` block from `CLAUDE.md` so the rules are not duplicated.
+   `muninn hooks install --agent claude --scope user|project` adds the new `Stop`/after-edit hook.
+5. Verify with `muninn doctor --json`: `graphFreshness.fresh` must be `true`, and rules and hooks are
+   reported per agent.
+
+The schema v5 migration rebuilds the FTS tables and adds the trigram index, so a database grows by
+roughly the size of its observation text, once per project.
 
 ## 0.4.1
 
