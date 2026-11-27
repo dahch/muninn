@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS observation_entities (
 CREATE INDEX IF NOT EXISTS idx_observation_entities_entity_id ON observation_entities(entity_id);
 
 -- Entity Dependencies table
--- Relaciones topológicas entre símbolos (A llama/importa a B, o A implementa a B)
+-- Topological relations between symbols (A calls/imports B, or A implements B)
 CREATE TABLE IF NOT EXISTS entity_dependencies (
   source_entity_id TEXT NOT NULL,
   target_entity_id TEXT NOT NULL,

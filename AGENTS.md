@@ -82,6 +82,10 @@ for the staged setup scope.
 - Relative imports use `.js` extensions and TypeScript strict mode is enforced.
 - Add new ADRs to [`ADR.md`](./ADR.md) instead of editing past decisions. Mark unimplemented proposals
   as `Proposed` and keep documentation free of claims that they already exist.
+- English is the repository language: documentation (`README`, `DESIGN`, `SPEC`, `ADR`, `CHANGELOG`,
+  `ROADMAP`, `plan.md`, `AGENTS.md`), code comments, commit messages, pull-request titles and
+  descriptions, and release notes are written in English. Conversation with the maintainer stays in the
+  maintainer's language; this rule governs repository artifacts only.
 - Update [`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased` for user-visible changes.
 
 <!-- muninn:rules:start -->
