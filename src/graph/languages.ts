@@ -196,6 +196,8 @@ export interface DiscoveredFile {
   relativePath: string;
   size: number;
   mtimeMs: number;
+  /** Change time: a content rewrite updates it even when mtime is restored. */
+  ctimeMs: number;
 }
 
 function gitFileList(root: string): string[] | null {
@@ -256,6 +258,7 @@ export function discoverFiles(
       relativePath: normalizePath(relativePath),
       size: stat.size,
       mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
     });
   };
 

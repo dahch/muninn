@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { assertDocPath } from "../util/path-safety.js";
+import { symbolSearchTokens } from "../util/text.js";
 import {
   deriveProjectUid,
   findGitCommonRoot,
@@ -121,7 +122,7 @@ export interface EnsureProjectOptions {
 }
 
 export const SCHEMA_SQL = `-- Muninn Engine Database Schema
--- Version 2.0.0 (user_version = 2)
+-- Version 5 (user_version = 5)
 
 -- Projects table
 CREATE TABLE IF NOT EXISTS projects (
@@ -165,13 +166,17 @@ CREATE INDEX IF NOT EXISTS idx_observations_project_id ON observations(project_i
 CREATE INDEX IF NOT EXISTS idx_observations_updated_at ON observations(updated_at);
 CREATE INDEX IF NOT EXISTS idx_observations_project_updated ON observations(project_id, updated_at DESC, created_at DESC);
 
--- Observations FTS5 virtual table
+-- Observations FTS5 virtual table.
+-- Porter stemming with diacritic folding: "verifying" matches "verify" and
+-- "sesion" matches "sesión". Substring recovery lives in observations_trigram
+-- so ranking keeps an exact tokenizer.
 CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
   title,
   content,
   topic_key,
   content='observations',
-  content_rowid='rowid'
+  content_rowid='rowid',
+  tokenize='porter unicode61 remove_diacritics 2'
 );
 
 -- Triggers for automatic FTS5 synchronization
@@ -190,6 +195,34 @@ CREATE TRIGGER IF NOT EXISTS obs_au AFTER UPDATE ON observations BEGIN
   VALUES ('delete', old.rowid, old.title, old.content, old.topic_key);
   INSERT INTO observations_fts(rowid, title, content, topic_key)
   VALUES (new.rowid, new.title, new.content, new.topic_key);
+END;
+
+
+-- Substring recovery (trigram) used only when the stemmed tokenizer finds
+-- nothing. FTS5 trigram matches any substring of three characters or more.
+CREATE VIRTUAL TABLE IF NOT EXISTS observations_trigram USING fts5(
+  title,
+  content,
+  content='observations',
+  content_rowid='rowid',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS obs_tri_ai AFTER INSERT ON observations BEGIN
+  INSERT INTO observations_trigram(rowid, title, content)
+  VALUES (new.rowid, new.title, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS obs_tri_ad AFTER DELETE ON observations BEGIN
+  INSERT INTO observations_trigram(observations_trigram, rowid, title, content)
+  VALUES ('delete', old.rowid, old.title, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS obs_tri_au AFTER UPDATE ON observations BEGIN
+  INSERT INTO observations_trigram(observations_trigram, rowid, title, content)
+  VALUES ('delete', old.rowid, old.title, old.content);
+  INSERT INTO observations_trigram(rowid, title, content)
+  VALUES (new.rowid, new.title, new.content);
 END;
 
 -- Entities table
@@ -292,6 +325,7 @@ CREATE TABLE IF NOT EXISTS code_files (
   bytes INTEGER,
   lines INTEGER,
   mtime_ms INTEGER,
+  ctime_ms INTEGER,
   is_test INTEGER NOT NULL DEFAULT 0,
   is_generated INTEGER NOT NULL DEFAULT 0,
   indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -316,6 +350,9 @@ CREATE TABLE IF NOT EXISTS code_symbols (
   is_exported INTEGER NOT NULL DEFAULT 0,
   parent_symbol_id TEXT,
   language TEXT,
+  -- Subword tokens (camelCase and snake_case split) so a search for "contract"
+  -- finds verifyTypeScriptContracts. Filled by the indexer.
+  search_tokens TEXT,
   UNIQUE(project_id, qualified_name)
 );
 
@@ -348,30 +385,43 @@ CREATE TABLE IF NOT EXISTS code_index_state (
   PRIMARY KEY(project_id, index_root, path)
 );
 
+-- One row per indexed worktree root: the cheap freshness fingerprint.
+CREATE TABLE IF NOT EXISTS code_index_roots (
+  project_id TEXT NOT NULL,
+  index_root TEXT NOT NULL,
+  head_sha TEXT,
+  indexed_at DATETIME,
+  indexer_version INTEGER,
+  files INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, index_root)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS code_symbols_fts USING fts5(
   name,
   qualified_name,
   signature,
   doc,
+  search_tokens,
   content='code_symbols',
-  content_rowid='rowid'
+  content_rowid='rowid',
+  tokenize='porter unicode61 remove_diacritics 2'
 );
 
 CREATE TRIGGER IF NOT EXISTS code_symbols_ai AFTER INSERT ON code_symbols BEGIN
-  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc)
-  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc);
+  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc, new.search_tokens);
 END;
 
 CREATE TRIGGER IF NOT EXISTS code_symbols_ad AFTER DELETE ON code_symbols BEGIN
-  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc)
-  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc);
+  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc, old.search_tokens);
 END;
 
 CREATE TRIGGER IF NOT EXISTS code_symbols_au AFTER UPDATE ON code_symbols BEGIN
-  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc)
-  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc);
-  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc)
-  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc);
+  INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc, old.search_tokens);
+  INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc, search_tokens)
+  VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc, new.search_tokens);
 END;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS code_files_fts USING fts5(
@@ -528,7 +578,7 @@ export function getDatabase(dbPath?: string, startDir?: string): Database.Databa
 }
 
 /** Current schema version tracked in `PRAGMA user_version`. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 function tableColumns(db: Database.Database, table: string): Set<string> {
   const rows = db
@@ -616,6 +666,128 @@ export function migrateDatabase(db: Database.Database): number {
     db.exec(
       "UPDATE observations SET scope = 'project' WHERE scope IS NULL"
     );
+
+    // v4 → v5: lexical index v2. SQLite cannot change a tokenizer in place, so a
+    // table whose stored SQL predates the change is dropped and rebuilt. Both a
+    // fresh schema.sql and a migrated database end with the same table shape.
+    const ftsTableSql = (name: string): string | null => {
+      const row = db
+        .prepare<[string], { sql: string | null }>(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?"
+        )
+        .get(name);
+      return row?.sql ?? null;
+    };
+
+    const observationsFtsSql = ftsTableSql("observations_fts");
+    if (observationsFtsSql === null || !observationsFtsSql.includes("porter")) {
+      db.exec(`
+        DROP TRIGGER IF EXISTS obs_ai;
+        DROP TRIGGER IF EXISTS obs_ad;
+        DROP TRIGGER IF EXISTS obs_au;
+        DROP TABLE IF EXISTS observations_fts;
+        CREATE VIRTUAL TABLE observations_fts USING fts5(
+          title,
+          content,
+          topic_key,
+          content='observations',
+          content_rowid='rowid',
+          tokenize='porter unicode61 remove_diacritics 2'
+        );
+        CREATE TRIGGER obs_ai AFTER INSERT ON observations BEGIN
+          INSERT INTO observations_fts(rowid, title, content, topic_key)
+          VALUES (new.rowid, new.title, new.content, new.topic_key);
+        END;
+        CREATE TRIGGER obs_ad AFTER DELETE ON observations BEGIN
+          INSERT INTO observations_fts(observations_fts, rowid, title, content, topic_key)
+          VALUES ('delete', old.rowid, old.title, old.content, old.topic_key);
+        END;
+        CREATE TRIGGER obs_au AFTER UPDATE ON observations BEGIN
+          INSERT INTO observations_fts(observations_fts, rowid, title, content, topic_key)
+          VALUES ('delete', old.rowid, old.title, old.content, old.topic_key);
+          INSERT INTO observations_fts(rowid, title, content, topic_key)
+          VALUES (new.rowid, new.title, new.content, new.topic_key);
+        END;
+      `);
+      db.exec("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
+    }
+
+    // Trigram recovery is created by schema.sql for both paths; the rebuild makes
+    // it consistent with rows an earlier version wrote without the trigger.
+    if (ftsTableSql("observations_trigram") !== null) {
+      db.exec(
+        "INSERT INTO observations_trigram(observations_trigram) VALUES('rebuild')"
+      );
+    }
+
+    if (!tableColumns(db, "code_symbols").has("search_tokens")) {
+      db.exec("ALTER TABLE code_symbols ADD COLUMN search_tokens TEXT DEFAULT ''");
+    }
+    if (!tableColumns(db, "code_files").has("ctime_ms")) {
+      db.exec("ALTER TABLE code_files ADD COLUMN ctime_ms INTEGER");
+    }
+    const symbolsFtsSql = ftsTableSql("code_symbols_fts");
+    const rebuildSymbols =
+      symbolsFtsSql === null || !symbolsFtsSql.includes("search_tokens");
+    if (rebuildSymbols) {
+      // Drop the old triggers and index first: a backfill UPDATE must not emit
+      // FTS "delete" commands against an index that is being replaced, because a
+      // mismatched delete is reported as SQLITE_CORRUPT_VTAB.
+      db.exec(`
+        DROP TRIGGER IF EXISTS code_symbols_ai;
+        DROP TRIGGER IF EXISTS code_symbols_ad;
+        DROP TRIGGER IF EXISTS code_symbols_au;
+        DROP TABLE IF EXISTS code_symbols_fts;
+      `);
+    }
+
+    // Backfill subword tokens for symbols an earlier version indexed.
+    const untokenized = db
+      .prepare<[], { id: string; name: string; qualified_name: string }>(
+        "SELECT id, name, qualified_name FROM code_symbols WHERE search_tokens IS NULL OR search_tokens = ''"
+      )
+      .all();
+    if (untokenized.length > 0) {
+      const updateTokens = db.prepare(
+        "UPDATE code_symbols SET search_tokens = ? WHERE id = ?"
+      );
+      for (const row of untokenized) {
+        updateTokens.run(
+          symbolSearchTokens(row.name, row.qualified_name),
+          row.id
+        );
+      }
+    }
+
+    if (rebuildSymbols) {
+      db.exec(`
+        CREATE VIRTUAL TABLE code_symbols_fts USING fts5(
+          name,
+          qualified_name,
+          signature,
+          doc,
+          search_tokens,
+          content='code_symbols',
+          content_rowid='rowid',
+          tokenize='porter unicode61 remove_diacritics 2'
+        );
+        CREATE TRIGGER code_symbols_ai AFTER INSERT ON code_symbols BEGIN
+          INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc, search_tokens)
+          VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc, new.search_tokens);
+        END;
+        CREATE TRIGGER code_symbols_ad AFTER DELETE ON code_symbols BEGIN
+          INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc, search_tokens)
+          VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc, old.search_tokens);
+        END;
+        CREATE TRIGGER code_symbols_au AFTER UPDATE ON code_symbols BEGIN
+          INSERT INTO code_symbols_fts(code_symbols_fts, rowid, name, qualified_name, signature, doc, search_tokens)
+          VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc, old.search_tokens);
+          INSERT INTO code_symbols_fts(rowid, name, qualified_name, signature, doc, search_tokens)
+          VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc, new.search_tokens);
+        END;
+      `);
+      db.exec("INSERT INTO code_symbols_fts(code_symbols_fts) VALUES('rebuild')");
+    }
 
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();

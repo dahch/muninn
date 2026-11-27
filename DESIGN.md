@@ -302,7 +302,21 @@ Executes BM25 full-text keyword searches across observations:
   - Alphanumeric words and phrases are wrapped in double quotes (e.g. `"MemoryService::saveObservation"`, `"src/client.ts"`) to treat punctuation, slashes, and colons as literal search terms rather than FTS5 syntax operators.
   - Trailing asterisks are preserved for prefix search (`"token"*`).
   - Standalone syntax operators (e.g. `*`, `///`, `:::`, `---`) and empty whitespace queries are stripped. If no valid terms remain, an empty array `[]` is returned safely without executing the query or throwing syntax errors.
-- **Relevance Ranking**: Results are ordered by `bm25(observations_fts) ASC` (in SQLite FTS5 BM25, lower scores indicate higher relevance).
+- **Query Planning (`src/service/search-plan.ts`, ADR-29)**: The sanitized conjunction runs first. If
+  it cannot fill the page (or returns nothing), the same terms are re-run joined with `OR` and
+  prefix-expanded (`"term"*`), and their rows are appended with monotonically worse ranks so a
+  weaker match never outranks a complete one. If both tiers are empty, a trigram substring tier
+  runs. `match: "all"` keeps the strict conjunction only.
+- **Relevance Ranking**: Results are ordered by `bm25(observations_fts, 8.0, 1.0, 3.0) ASC` — title
+  and topic key weigh more than the body (in SQLite FTS5 BM25, lower scores indicate higher
+  relevance). Observations linked to an entity named in the query receive a small rank bonus, and
+  rows with identical title and content collapse to the best-ranked copy.
+- **Index Tokenizer (ADR-30)**: `observations_fts` uses `porter unicode61 remove_diacritics 2`, so
+  `verifying` matches `verify` and `sesion` matches `sesión`; `observations_trigram` provides
+  substring recovery for the last tier.
+- **MCP Projection (`src/mcp/compact.ts`)**: `muninn_search` and `muninn_context` return identity,
+  rank and a bounded excerpt with at most five entity identifiers; `detail: "full"` returns whole
+  bodies.
 - **Project Scoping**: Searches default to `currentProject.id`. Scoping can be overridden with an explicit `projectId` / `project_id`, or expanded globally with `allProjects: true`.
 - **Entity Attachment**: Hydrates linked entities for all matching observations via `_fetchEntitiesForObservations`.
 - **Lifecycle Filter**: Excludes `superseded` observations at query time by default. `includeSuperseded: true` includes both statuses and results expose `status` and `superseded_by`.
@@ -778,7 +792,9 @@ flowchart TD
 #### 7. `muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>] [--portable|--no-portable] [--no-rules] [--force] [--dry-run] [--status]`
 
 - **Purpose**: List, install, or diagnose Muninn's portable configuration, the JSON-format
-  destinations, the Codex TOML destination, and marked rules blocks in the 13-agent catalog. See §7
+  destinations, the Codex TOML destination, and per-agent rules in the 14-destination catalog:
+  a marked block for shared files and a dedicated file where the catalog declares a native slot
+  (`.claude/rules/muninn.md`, `.windsurf/rules/muninn.md`). See §7
   and [`plan.md`](./plan.md).
 - **Workflow**:
   - `--home <path>` overrides the OS home directory (useful for tests); a missing value is a usage
@@ -787,6 +803,9 @@ flowchart TD
   - `--list` prints IDs, labels, formats, resolved/templated MCP paths, and rules paths, then returns
     before any writer or inspection. It rejects combinations with `--status`, `--dry-run`, `--force`,
     `--agent`, and `--no-portable`.
+  - `--components mcp,rules,portable|all` selects what is installed (default all); `--no-rules` and
+    `--no-portable` narrow the same selection, an empty or unknown selection is a usage error, and
+    hooks are never installed by `setup`. Status reports exactly the selected components.
   - `--agent` parses one ID, `all`, or a comma-separated list, deduplicates in catalog order, and reports
     unknown IDs with the valid list and exit code 1. Without `--agent`, normal setup handles only the
     portable destination and leaves rules files unread and unwritten. With a selection, setup processes
@@ -1326,8 +1345,11 @@ identity, before decisions, so budget truncation protects continuity first.
 
 1. **Discovery** (`graph/languages.ts`): `git ls-files -co --exclude-standard` in a work tree,
    otherwise a walker that skips default build directories and applies root `.gitignore` globs.
-2. **Change detection** (`graph/indexer.ts`): `code_files.mtime_ms` + `bytes` skip unchanged files
-   without reading them; content is hashed before parsing.
+2. **Change detection** (`graph/indexer.ts`, ADR-30): `mtime_ms` + `ctime_ms` + `bytes` plus a
+   matching `INDEXER_VERSION` skip unchanged files without reading them. When the fingerprint moved,
+   the content is hashed and compared with `content_hash`: identical bytes refresh only the
+   fingerprint, different bytes are parsed. `code_index_roots` stores the worktree HEAD, indexer
+   version and file count for cheap freshness checks.
 3. **Extraction** (`graph/extractor.ts`, `graph/treesitter.ts`): Tier A uses `ts.createSourceFile`
    with spans, imports, heritage and call sites; Tier B lazily loads `web-tree-sitter` and a WASM
    grammar from `@vscode/tree-sitter-wasm` for Python, Go, Rust, Java, C/C++, C#, Ruby, PHP and Bash,

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import chalk from "chalk";
+import type { RulesStrategy } from "../setup/registry.js";
 import {
   getPortableStatus,
   setupPortable,
@@ -41,13 +42,16 @@ export function printSetupUsage(): void {
   console.log(`muninn setup — Install and diagnose Muninn agent integrations
 
 Usage:
-  muninn setup [--portable] [--no-rules] [--force] [--dry-run] [--status] [--list]
+  muninn setup [--components <list|all>] [--portable] [--no-rules] [--force]
+               [--dry-run] [--status] [--list]
                [--agent <id|all|id,id>] [--project <path>] [--home <path>]
 
 Options:
   --list           List the agent catalog without modifying anything
   --agent <ids>    Configure one ID, all, or a comma-separated list
   --project <path> Project root used by project-level agent configs
+  --components     What to install: any of mcp, rules, portable (default all).
+                   Nothing is installed that was not selected.
   --portable       Install the portable MCP configuration (default)
   --no-portable    Skip the portable configuration (requires --agent)
   --no-rules       Skip installing marked usage rules for selected agents
@@ -114,6 +118,7 @@ function warnMissingBinaries(targets: AgentTarget[]): void {
 interface RulesGroup {
   path: string;
   agents: AgentId[];
+  strategy: RulesStrategy;
 }
 
 function resolveRulesGroups(
@@ -128,9 +133,17 @@ function resolveRulesGroups(
     const key = path.resolve(rulesPath);
     const existing = groups.get(key);
     if (existing === undefined) {
-      groups.set(key, { path: key, agents: [id] });
+      groups.set(key, {
+        path: key,
+        agents: [id],
+        strategy: AGENT_REGISTRY[id].rulesStrategy,
+      });
     } else {
       existing.agents.push(id);
+      // A shared file can only be owned one way; preserve the user's prose.
+      if (AGENT_REGISTRY[id].rulesStrategy !== "dedicated") {
+        existing.strategy = "marked-block";
+      }
     }
   }
   return [...groups.values()];
@@ -273,6 +286,41 @@ function selectedTargets(selection: AgentId[] | undefined): AgentTarget[] {
   return (selection ?? AGENT_IDS).map((id) => AGENT_REGISTRY[id]);
 }
 
+type SetupComponent = "mcp" | "rules" | "portable";
+const SETUP_COMPONENTS: SetupComponent[] = ["mcp", "rules", "portable"];
+
+function parseComponents(
+  value: unknown,
+): { ok: true; components: Set<SetupComponent> } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, components: new Set(SETUP_COMPONENTS) };
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return { ok: false, error: "--components requires a comma-separated list of mcp, rules, portable, or all." };
+  }
+  const requested = value
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+  if (requested.length === 0) {
+    return { ok: false, error: "--components requires a comma-separated list of mcp, rules, portable, or all." };
+  }
+  if (requested.includes("all")) {
+    return { ok: true, components: new Set(SETUP_COMPONENTS) };
+  }
+  const unknown = requested.filter(
+    (entry) => !SETUP_COMPONENTS.includes(entry as SetupComponent),
+  );
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      error: `Unknown component${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}. Valid components: ${SETUP_COMPONENTS.join(", ")}, all.`,
+    };
+  }
+  return {
+    ok: true,
+    components: new Set(requested as SetupComponent[]),
+  };
+}
+
 export async function handleSetupCommand(
   args: Record<string, string | boolean | undefined>,
 ): Promise<void> {
@@ -298,6 +346,16 @@ export async function handleSetupCommand(
   const list = isEnabled(args["--list"]);
   const noPortable = isEnabled(args["--no-portable"]);
   const noRules = isEnabled(args["--no-rules"]);
+  const parsedComponents = parseComponents(args["--components"]);
+  if (!parsedComponents.ok) {
+    setupError(parsedComponents.error);
+    printSetupUsage();
+    return;
+  }
+  const components = parsedComponents.components;
+  // The long-standing flags narrow the same selection instead of competing with it.
+  if (noPortable) components.delete("portable");
+  if (noRules) components.delete("rules");
   const status = isEnabled(args["--status"]);
   const dryRun = isEnabled(args["--dry-run"]);
   const force = isEnabled(args["--force"]);
@@ -306,6 +364,12 @@ export async function handleSetupCommand(
 
   if (list && (status || dryRun || force || noPortable || hasAgent)) {
     setupError("--list cannot be combined with --status, --dry-run, --force, --agent, or --no-portable.");
+    printSetupUsage();
+    return;
+  }
+
+  if (components.size === 0) {
+    setupError("--components selected nothing to install.");
     printSetupUsage();
     return;
   }
@@ -329,12 +393,18 @@ export async function handleSetupCommand(
     selection = parsed.ids;
   }
 
-  if (noPortable && selection === undefined) {
-    setupError(
-      noRules
-        ? "--no-portable --no-rules requires --agent; there is nothing to do."
-        : "--no-portable requires --agent; there is nothing to do.",
-    );
+  if (!components.has("portable") && selection === undefined) {
+    if (args["--components"] !== undefined) {
+      setupError(
+        "Without --agent there is nothing to do unless the portable component is selected.",
+      );
+    } else {
+      setupError(
+        noRules
+          ? "--no-portable --no-rules requires --agent; there is nothing to do."
+          : "--no-portable requires --agent; there is nothing to do.",
+      );
+    }
     printSetupUsage();
     return;
   }
@@ -381,11 +451,12 @@ export async function handleSetupCommand(
       }
     }
 
-    if (selection !== undefined && !noRules) {
+    if (selection !== undefined && components.has("rules")) {
       for (const group of resolveRulesGroups(selection, projectPath)) {
         const result = getRulesTargetStatus({
           path: group.path,
           agents: group.agents,
+          strategy: group.strategy,
           projectPath,
         });
         printRulesStatus(result);
@@ -393,7 +464,7 @@ export async function handleSetupCommand(
       }
     }
 
-    if (!noPortable) {
+    if (components.has("portable")) {
       const result = getPortableStatus(options);
       printStatus(result);
       if (result.error !== undefined || result.errors.length > 0) fatal = true;
@@ -403,12 +474,12 @@ export async function handleSetupCommand(
     return;
   }
 
-  const includePortable = selection === undefined || !noPortable;
+  const includePortable = components.has("portable");
 
   if (selection !== undefined) {
     const targets = selectedTargets(selection);
-    warnMissingBinaries(targets);
-    for (const target of targets) {
+    if (components.has("mcp")) warnMissingBinaries(targets);
+    for (const target of components.has("mcp") ? targets : []) {
       if (target.format === "manual") {
         console.log(
           `${target.label} (${target.id}): manual. Install the dsh-mcp plugin in the DSH profile, then add Muninn from its MCP UI.`,
@@ -454,11 +525,12 @@ export async function handleSetupCommand(
       }
     }
 
-    if (!noRules) {
+    if (components.has("rules")) {
       for (const group of resolveRulesGroups(selection, projectPath)) {
         const report = setupRulesTarget({
           path: group.path,
           agents: group.agents,
+          strategy: group.strategy,
           projectPath,
           force,
           dryRun,

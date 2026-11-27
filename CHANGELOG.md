@@ -9,6 +9,37 @@
   (recent activity, related symbols, global preferences), so a large project is no longer stuck with
   a permanently truncated brief. The uncapped render ends with a deterministic `_Full brief: …_`
   footer stating its size and each section's row count.
+- **Tiered lexical search (ADR-29).** `muninn_search` now runs an exact conjunction first, adds a
+  prefix-expanded `OR` fallback only when that page is incomplete, and finally a trigram substring
+  tier. Natural-language recall on the measured query set rises from 3/10 to 10/10 while path,
+  symbol and phrase queries keep their precision. A new `match: "all"` option restores strict
+  conjunction behavior.
+- **Compact tool results (ADR-29).** `muninn_search` and `muninn_context` return identity, rank and a
+  90-character excerpt by default, with at most five linked entity identifiers; `detail: "full"`
+  returns whole bodies. A default ten-result page drops from about 2.8k to about 0.8k tokens.
+- **Lexical index v2 (ADR-30).** Schema v5 rebuilds the memory index with
+  `porter unicode61 remove_diacritics 2`, adds a trigram recovery table, and indexes camelCase and
+  snake_case subwords for code symbols, so `contract` finds `verifyTypeScriptContracts`.
+- **Graph freshness everywhere (ADR-31).** A `code_index_roots` fingerprint, `git status` probing and
+  a per-file stat fallback feed a STALE line in the session brief, a `freshness` field in
+  `muninn_project status`, a warning in `muninn doctor`, and a debounced, bounded auto-index before
+  graph-reading MCP tools (`MUNINN_AUTO_INDEX=0` disables it).
+- **`muninn hook after-edit`** refreshes the code graph incrementally from any agent's hook mechanism,
+  is a no-op without a Muninn database, and is installed in Claude Code's `Stop` event.
+- **Adapter descriptors (ADR-32).** Catalog entries declare `rulesStrategy` (`dedicated`,
+  `marked-block`, `none`) and a hook installer descriptor. Claude's rules move to a dedicated
+  `.claude/rules/muninn.md`; `muninn hooks install` accepts `--agent <id>` and `--scope user|project`;
+  `muninn doctor` reports rules and hook state per agent from the catalog.
+- **`muninn memory dedup`** collapses redundant memory: a `muninn-seed` extract that shares its
+  title with a session record, or two observations with identical title and body, are marked
+  `superseded` (never deleted) and point at the row that was kept. `--dry-run` reports first.
+- **Summary-first session brief (ADR-33).** `muninn_bootstrap` renders a bounded map by default
+  (`detail: "summary"`): fewer decisions, short gists, and a count of the omitted ones. `detail:
+  "full"` restores the previous rendering, and the uncapped `budgetChars: "all"` mode implies it.
+
+- **Setup installs only what you select.** `muninn setup --components mcp,rules,portable|all` chooses
+  the destination set explicitly; `--no-rules` and `--no-portable` narrow it further, and hooks stay
+  a separate opt-in (`muninn hooks install`). Nothing the user did not ask for is written.
 
 ### Changed
 
@@ -19,6 +50,18 @@
   share `resolveSessionBriefBudget`. `muninn hook session-start --budget 60000` is rejected with the
   `"all"` remedy instead of being silently clamped to 20,000, and the hook defaults to 8,000
   characters like every other surface instead of 4,000.
+- The advertised MCP tool schemas drop per-tool banners, alias prose and fields a model does not need
+  to choose a call, cutting the fixed per-session schema cost from 16.5k to about 10k characters.
+  Snake_case aliases keep working through argument normalization.
+- Incremental indexing requires a matching `INDEXER_VERSION`, compares `content_hash` when the
+  fingerprint changes, and refreshes only the fingerprint when the bytes are identical.
+
+### Fixed
+
+- Reindexing now detects a file whose bytes changed even when its mtime and size were preserved, and
+  re-parses everything after an indexer upgrade or a worktree commit change.
+- A failed FTS query no longer triggers the fallback tiers, which previously could mask a broken index.
+- Symbol search reaches subwords of identifiers instead of requiring the full token.
 
 ## 0.4.1
 

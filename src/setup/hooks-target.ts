@@ -15,15 +15,22 @@ import { renderConfig, safeWriteAtomic } from "./portable.js";
 
 export const HOOK_START_COMMAND = "muninn hook session-start";
 export const HOOK_END_COMMAND = "muninn hook session-end --agent claude";
+export const HOOK_INDEX_COMMAND = "muninn hook after-edit --quiet";
 
 export interface HookPlanEntry {
-  event: "SessionStart" | "SessionEnd";
+  event: "SessionStart" | "SessionEnd" | "Stop";
   command: string;
 }
 
+/**
+ * Session start/end carry the memory across sessions; the Stop hook refreshes the
+ * derived code graph once per turn, after the edits of that turn are done. One
+ * process per turn is cheap; per-edit hooks would spawn on every write.
+ */
 export const CLAUDE_HOOK_PLAN: HookPlanEntry[] = [
   { event: "SessionStart", command: HOOK_START_COMMAND },
   { event: "SessionEnd", command: HOOK_END_COMMAND },
+  { event: "Stop", command: HOOK_INDEX_COMMAND },
 ];
 
 export type HooksState =

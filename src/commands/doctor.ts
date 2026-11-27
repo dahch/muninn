@@ -18,8 +18,16 @@ import {
   projectStorageDir,
   resolveProjectContext,
 } from "../project/identity.js";
-import { getIndexStatus } from "../graph/index.js";
+import { checkIndexFreshness, getIndexStatus } from "../graph/index.js";
 import { getHooksStatus } from "../setup/hooks-target.js";
+import { getRulesTargetStatus } from "../setup/rules-target.js";
+import {
+  AGENT_IDS,
+  AGENT_REGISTRY,
+  resolveHooksPath,
+  resolveMcpPaths,
+  resolveRulesPath,
+} from "../setup/registry.js";
 
 export function printDoctorUsage(): void {
   console.log(`muninn doctor — diagnose Muninn across projects and agents
@@ -142,19 +150,45 @@ function nativeDshServers(): Array<{ file: string; servers: string[] }> {
   return found;
 }
 
+/**
+ * Probe every home-scoped MCP destination in the catalog. Project-scoped paths
+ * (`{project}/...`) belong to the project and are reported by setup/status, not
+ * by a machine-wide doctor run.
+ */
 function agentProbes(): AgentProbe[] {
-  const opencodeDir =
-    process.env.MUNINN_OPENCODE_CONFIG_DIR?.trim() ||
-    path.join(home(), ".config", "opencode");
-  return [
-    { id: "claude", label: "Claude Code / Desktop", path: path.join(home(), ".claude.json"), format: "json-mcpServers" },
-    { id: "opencode", label: "OpenCode", path: path.join(opencodeDir, "opencode.json"), format: "json-opencode" },
-    { id: "codex", label: "Codex CLI", path: path.join(home(), ".codex", "config.toml"), format: "toml" },
-    { id: "pi", label: "Pi", path: path.join(home(), ".pi", "mcp.json"), format: "json-mcpServers" },
-    { id: "pi-agent", label: "Pi (agent profile)", path: path.join(home(), ".pi", "agent", "mcp.json"), format: "json-mcpServers" },
-    { id: "cursor", label: "Cursor", path: path.join(home(), ".cursor", "mcp.json"), format: "json-mcpServers" },
-    { id: "commandcode", label: "Command Code", path: path.join(home(), ".commandcode", "mcp.json"), format: "json-mcpServers" },
-  ];
+  const probes: AgentProbe[] = [];
+  const seen = new Set<string>();
+  for (const id of AGENT_IDS) {
+    const spec = AGENT_REGISTRY[id];
+    if (spec.format === "manual" || spec.mcpPaths.length === 0) continue;
+    let resolved: string[];
+    try {
+      resolved = resolveMcpPaths(id, { homeDir: home() });
+    } catch {
+      continue;
+    }
+    let index = 0;
+    for (const candidate of resolved) {
+      if (candidate.includes("{project}")) continue;
+      const key = path.resolve(candidate);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      index += 1;
+      const format: AgentProbe["format"] =
+        spec.format === "toml"
+          ? "toml"
+          : spec.format === "opencode"
+            ? "json-opencode"
+            : "json-mcpServers";
+      probes.push({
+        id: index === 1 ? id : `${id}#${index}`,
+        label: index === 1 ? spec.label : `${spec.label} (${path.basename(path.dirname(candidate))})`,
+        path: candidate,
+        format,
+      });
+    }
+  }
+  return probes;
 }
 
 interface ProbeResult {
@@ -308,20 +342,24 @@ export async function handleDoctorCommand(
   const memory = countMemory(dbPath);
 
   let graph = null as ReturnType<typeof getIndexStatus> | null;
+  let freshness = null as ReturnType<typeof checkIndexFreshness> | null;
   if (memory.exists && memory.projectId) {
     let db: Database.Database | null = null;
     try {
       db = new Database(dbPath, { readonly: true, fileMustExist: true });
-      graph = getIndexStatus({
+      const graphService = {
         db,
         currentProject: {
           id: memory.projectId,
           root_path: context.rootPath,
           name: context.name,
         },
-      });
+      };
+      graph = getIndexStatus(graphService);
+      freshness = checkIndexFreshness(graphService);
     } catch {
       graph = null;
+      freshness = null;
     } finally {
       db?.close();
     }
@@ -366,24 +404,57 @@ export async function handleDoctorCommand(
     state: dsh.state,
     detail: dsh.detail,
   });
-  const hooks = getHooksStatus({
-    path: path.join(home(), ".claude", "settings.json"),
-  });
-  const hookState: ConfigState =
-    hooks.state === "present"
-      ? "registered"
-      : hooks.state === "absent" || hooks.state === "partial"
-        ? "missing"
-        : "malformed";
-  probes.push({
-    id: "claude-hooks",
-    label: "Claude hooks",
-    path: hooks.path,
-    state: hookState,
-    detail:
+  // Hooks are a per-agent descriptor, not a Claude special case.
+  for (const id of AGENT_IDS) {
+    const spec = AGENT_REGISTRY[id];
+    if (!spec.hooks) continue;
+    const hookPath = resolveHooksPath(id, {
+      scope: "user",
+      homeDir: home(),
+    });
+    if (!hookPath) continue;
+    const hooks = getHooksStatus({ path: hookPath });
+    const hookState: ConfigState =
       hooks.state === "present"
-        ? "session start/end installed"
-        : "optional: run 'muninn hooks install'",
+        ? "registered"
+        : hooks.state === "absent" || hooks.state === "partial"
+          ? "missing"
+          : "malformed";
+    probes.push({
+      id: `${id}-hooks`,
+      label: `${spec.label} hooks`,
+      path: hooks.path,
+      state: hookState,
+      detail:
+        hooks.state === "present"
+          ? "session start/end and graph refresh installed"
+          : hooks.state === "partial"
+            ? `some hooks missing: run 'muninn hooks install --agent ${id}'`
+            : `optional: run 'muninn hooks install --agent ${id}'`,
+    });
+  }
+
+  // Rules-file ownership is also catalog data: dedicated, marked block or none.
+  const rulesProbes = AGENT_IDS.filter((id) => {
+    const spec = AGENT_REGISTRY[id];
+    return spec.rulesStrategy !== "none" && spec.rulesFile.length > 0;
+  }).map((id) => {
+    const spec = AGENT_REGISTRY[id];
+    const rulesPath = resolveRulesPath(id, { projectPath: context.rootPath });
+    const status = getRulesTargetStatus({
+      path: rulesPath,
+      agents: [id],
+      projectPath: context.rootPath,
+      strategy: spec.rulesStrategy,
+    });
+    return {
+      id,
+      label: spec.label,
+      path: status.path,
+      strategy: spec.rulesStrategy,
+      state: status.state,
+      error: status.error,
+    };
   });
 
   const warnings: string[] = [];
@@ -402,8 +473,19 @@ export async function handleDoctorCommand(
   } else if ((memory.observations ?? 0) === 0) {
     warnings.push("Memory exists but is empty: run 'muninn seed' or save the first decision.");
   }
+  for (const rules of rulesProbes) {
+    if (rules.state === "malformed" || rules.state === "stale") {
+      warnings.push(
+        `${rules.label} rules: ${rules.state}${rules.error ? ` — ${rules.error}` : ""} (run 'muninn setup --agent ${rules.id}')`
+      );
+    }
+  }
   if (!graph || graph.files === 0) {
     warnings.push("The code graph is empty: run 'muninn index' (or muninn_project action=index).");
+  } else if (freshness && !freshness.fresh) {
+    warnings.push(
+      `The code graph is stale (${freshness.reason}): run 'muninn index' (or muninn_project action=index).`
+    );
   }
 
   if (args["--json"]) {
@@ -422,7 +504,9 @@ export async function handleDoctorCommand(
           storage: { directory: projectStorageDir(context.uid), databasePath: dbPath },
           memory,
           graph,
+          graphFreshness: freshness,
           agents: probes,
+          rules: rulesProbes,
           warnings,
         },
         null,
@@ -458,6 +542,15 @@ export async function handleDoctorCommand(
     console.log(`  Symbols:  ${graph.symbols}`);
     console.log(`  Edges:    ${graph.edges}`);
     console.log(`  Indexed:  ${graph.indexedAt ?? "unknown"}`);
+    if (freshness) {
+      console.log(
+        `  Fresh:    ${
+          freshness.fresh
+            ? chalk.green("yes")
+            : chalk.yellow(`no — ${freshness.reason}`)
+        }`
+      );
+    }
     if (graph.languages.length > 0) {
       console.log(
         "  Languages: " + graph.languages.map((row) => `${row.language} (${row.files})`).join(", ")
@@ -478,6 +571,22 @@ export async function handleDoctorCommand(
   for (const probe of probes) {
     console.log(`  ${probe.label.padEnd(28)} ${labels[probe.state]}`);
     console.log(chalk.dim(`    ${probe.path}`));
+  }
+
+  console.log("\nRules files");
+  for (const rules of rulesProbes) {
+    const label =
+      rules.state === "present"
+        ? chalk.green("present")
+        : rules.state === "stale"
+          ? chalk.yellow("stale")
+          : rules.state === "malformed"
+            ? chalk.red("malformed")
+            : chalk.dim("not installed");
+    const ownership =
+      rules.strategy === "dedicated" ? "dedicated file" : "marked block";
+    console.log(`  ${rules.label.padEnd(28)} ${label} ${chalk.dim(`(${ownership})`)}`);
+    if (rules.error) console.log(chalk.red(`    ${rules.error}`));
   }
 
   if (warnings.length === 0) {

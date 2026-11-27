@@ -46,9 +46,9 @@ branch `main`, last commit `8fa6d52`.
 |---|---|---|
 | Project-scoped observations | ✅ 5 categories, FTS5 + BM25, limit/clamp | `src/db/schema.sql`, `src/service/memory-service.ts` |
 | Decision supersession | ✅ atomic, opt-in, hidden by default | `saveObservation`, `search`, `getContext` |
-| Read-only session brief | ✅ bounded, deterministic, fail-open, path selection | `readSessionBrief`, `muninn_bootstrap`, `memory brief` |
+| Read-only session brief | ✅ bounded, deterministic, fail-open, path selection, tiered search with summary/full detail | `readSessionBrief`, `muninn_bootstrap`, `memory brief` |
 | JSONL export/import | ✅ atomic, path-screened, idempotent by ID | `syncToDisk`, `importFromDisk` |
-| Agent setup | ✅ 14 destinations (DSH manual), JSON + Codex TOML + portable + marked rules | `src/setup/` |
+| Agent setup | ✅ 14 destinations (DSH manual), JSON + Codex TOML + portable, per-agent rules (dedicated or marked) and opt-in hooks | `src/setup/` |
 | MCP surface | ✅ 13 tools, Zod-validated, bounded stdio | `src/mcp/server.ts` |
 | Safety | ✅ symlink/containment screens, atomic writes, 0600/0700 | `src/util/path-safety.ts` |
 
