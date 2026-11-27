@@ -649,6 +649,9 @@ fallback in `src/db/client.ts`, add or update a Vitest suite under `test/`, and 
 `npm run build && npm test && npm run typecheck` before opening a pull request. Add a new ADR for a
 new architectural decision instead of rewriting an existing one.
 
+All repository artifacts — documentation, code comments, commit messages, pull-request titles and
+descriptions, and release notes — are written in English.
+
 ## License
 
 MIT © Daniel Hernández
