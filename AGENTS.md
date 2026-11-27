@@ -36,9 +36,12 @@ Vitest default; the repository config sets a 20-second timeout.
   session workspace resolution (`session.ts`).
 - `src/graph/` — code graph: discovery, Tier A/B/C extraction (`extractor.ts`, `treesitter.ts`),
   incremental indexing, bounded queries and `explore` assembly.
-- `src/service/` — `MemoryService`: storage, retrieval, session brief, handoffs, graph neighbors.
+- `src/service/` — `MemoryService`: storage, retrieval, session brief, handoffs, graph neighbors, and
+  the query planner (`search-plan.ts`) behind tiered search.
 - `src/indexer/` — legacy TypeScript/JavaScript AST extraction kept for compatibility.
-- `src/mcp/` — MCP server, tool registry, Zod schemas, argument normalization, bounded stdio.
+- `src/mcp/` — MCP server, tool registry, Zod schemas, argument normalization, bounded stdio,
+  compact result/schema projections (`compact.ts`, `schema-compact.ts`) and the debounced graph
+  auto-index.
 - `src/commands/` — CLI handlers for memory, MCP, contract verification, setup, seed, index/graph,
   project identity, migrate, handoff/end-session, doctor, snapshot/restore and hooks.
 - `src/setup/` — agent catalog and path resolution (`registry.ts`), JSON `mcpServers` / OpenCode `mcp`
@@ -79,6 +82,18 @@ for the staged setup scope.
 - Setup preserves unrelated JSON data and `mcpServers` / `mcp` siblings as well as unrelated TOML
   tables and keys, and leaves a conflicting or legacy `muninn` entry untouched unless `--force` is
   supplied. A correct entry is byte-for-byte idempotent.
+- Search runs tiered: the sanitized conjunction first, then a prefix-expanded disjunction, then the
+  trigram tier; `match: "all"` keeps the strict conjunction. Compact MCP results are the default and
+  `detail: "full"` is the opt-in.
+- FTS tokenizer or column changes require a schema migration that drops and rebuilds the virtual
+  table and its triggers, then backfills derived columns before the rebuild.
+- Freshness is derived state: `code_index_roots` plus `INDEXER_VERSION` plus file fingerprints.
+  Agents refresh it through the MCP server (`MUNINN_AUTO_INDEX=0` disables) and `muninn hook
+  after-edit`; `muninn_project status`, the brief and `muninn doctor` must report it.
+- Setup destinations are catalog data: declare `rulesStrategy` and, where the agent exposes one, a
+  `hooks` descriptor in `src/setup/registry.ts` instead of adding agent-specific branches.
+- Setup writes only the components the caller selects (`--components mcp,rules,portable`), and hooks
+  are never installed by `setup`. `--status` and `--dry-run` must stay read-only.
 - Relative imports use `.js` extensions and TypeScript strict mode is enforced.
 - Add new ADRs to [`ADR.md`](./ADR.md) instead of editing past decisions. Mark unimplemented proposals
   as `Proposed` and keep documentation free of claims that they already exist.

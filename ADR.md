@@ -479,3 +479,130 @@ caller's responsibility, which is why the footer makes their size and compositio
 numeric ceiling is intentionally not raised: a bigger arbitrary number would not have removed the
 per-section caps and would have hidden the same dead end behind a longer brief.
 
+## ADR-29: Search is tiered, weighted and compact by default
+
+- **Date**: 2026-11-27
+- **Status**: Accepted and implemented
+- **Context**: FTS5 `MATCH` is a conjunction: `"session" "brief"` only matches rows that contain
+  both terms. Agents ask questions in natural language, so a strict conjunction silently returns
+  nothing for most real questions (measured: 3 of 10 representative queries returned any row). The
+  alternative — a vector index — was rejected by ADR-4 and remains out of scope.
+- **Decision**: Plan every query in tiers over the same FTS index. The first tier keeps the
+  historical conjunction (paths, symbols and phrases stay precise). The second tier is the same
+  terms joined with `OR` and prefix-expanded (`"term"*`); it only runs when the first tier could not
+  fill the page, and its rows are appended with monotonically worse ranks so a weaker match never
+  outranks a complete one. A third tier uses the trigram index for substring recovery and only runs
+  when both earlier tiers are empty. Ranking is BM25 with column weights (title 8, content 1, topic
+  key 3), plus a small boost for observations linked to an entity named in the query. Rows with
+  identical title and content collapse to the best-ranked copy. MCP results are compact by default
+  (identity, rank, 90-character excerpt, at most five linked entity identifiers); `detail: "full"`
+  returns the whole record.
+- **Consequences**: Natural-language recall rises from 3/10 to 10/10 on the measured set while
+  single-term, path and phrase queries keep their previous behaviour. A default ten-result page
+  costs roughly a quarter of the previous tokens. The tiers are deterministic and testable, and the
+  planner is one module (`src/service/search-plan.ts`). Callers that relied on the implicit
+  conjunction can pass `match: "all"` (the first tier) through the same planner.
+
+## ADR-30: The lexical index understands morphology and symbol subwords
+
+- **Date**: 2026-11-27
+- **Status**: Accepted and implemented
+- **Context**: The memory index used the default `unicode61` tokenizer, so `verifying` never matched
+  `verify` and `sesion` never matched `sesión`. Code-symbol search had a second gap: SQLite splits
+  tokens only on non-alphanumerics, so `verifyTypeScriptContracts` was one opaque token and a search
+  for `contract` found nothing. Freshness was also unreliable: the incremental check compared mtime
+  and size, `content_hash` was computed but never compared, and `INDEXER_VERSION` was written but
+  never read, so a changed extractor never invalidated an existing graph.
+- **Decision**: Schema v5 rebuilds the memory FTS table with `tokenize='porter unicode61
+  remove_diacritics 2'`, adds an `observations_trigram` table for substring recovery, and rebuilds
+  the symbol FTS with porter plus a `search_tokens` column filled with camelCase/snake_case subwords.
+  Incremental indexing now requires a matching `INDEXER_VERSION` and compares the file's content
+  hash when mtime, ctime and size differ from the stored fingerprint; identical bytes refresh only
+  the fingerprint. A `code_index_roots` row stores the worktree HEAD, indexer version and file count.
+  Migrations drop and rebuild FTS tables (a tokenizer cannot change in place), backfill subword
+  tokens before rebuilding, and stay idempotent.
+- **Consequences**: Morphological variants, diacritics and subword queries match without leaving
+  SQLite. Reindexing is correct after a file rewrite that preserves mtime, after a checkout and
+  after an indexer upgrade. The migration is heavier than the previous additive steps and must be
+  validated against real databases; `musl`-style SQLite builds older than 3.34 would not support
+  trigram, which the package's bundled SQLite does.
+
+## ADR-31: Graph freshness is a first-class signal and the MCP server refreshes it
+
+- **Date**: 2026-11-27
+- **Status**: Accepted and implemented
+- **Context**: Indexing was manual. The graph is derived state, so every answer that reads it
+  describes whatever commit was indexed last — in the measured project, 9 of 62 files had changed
+  five days after the last index. Rules files can ask an agent to index, but rules are advisory and
+  most agents expose no hook. The MCP server is the one activation path every supported agent shares.
+- **Decision**: Report freshness, do not assume it. `checkIndexFreshness` combines the stored root
+  fingerprint (`code_index_roots`), `git rev-parse HEAD` and `git status --porcelain`; it falls back
+  to stat-ing indexed files outside Git. Freshness appears in `muninn_project status`, in the
+  session brief ("Code graph" section with a STALE line) and in `muninn doctor`. Before a
+  graph-reading MCP tool runs, the server performs a debounced (10 s) incremental refresh, skipping
+  cold graphs and graphs more than 500 files behind, and `MUNINN_AUTO_INDEX=0` disables it. The
+  agent-agnostic command `muninn hook after-edit` refreshes incrementally and is a no-op in a project
+  without a Muninn database; the Claude hook plan calls it from `Stop` once per turn.
+- **Consequences**: Agents no longer need to remember to index, and every agent benefits, including
+  ones with no hooks. A refresh costs one process spawn per turn where the hook is installed and
+  one bounded incremental pass where it is not. The brief gains roughly 200 characters; the token
+  cost is repaid the first time an agent avoids a stale-symbol answer.
+
+## ADR-32: Setup adapters are catalog data, and each agent gets its best supported target
+
+- **Date**: 2026-11-27
+- **Status**: Accepted and implemented
+- **Context**: ADR-26 states that no agent is privileged, but the implementation had two Claude
+  special cases: the rules block was appended to the shared `CLAUDE.md`, and the hook installer
+  hardcoded `~/.claude/settings.json`. Devin already received a dedicated rules file, so the
+  catalog could express the difference without agent-specific code.
+- **Decision**: Every catalog entry declares `rulesStrategy` (`dedicated`, `marked-block` or `none`)
+  and, where the agent exposes one, a `hooks` descriptor with user and project settings paths and
+  the events to merge. Claude moves to a dedicated `.claude/rules/muninn.md` (Claude Code v2.1.211+
+  reads `.claude/rules/*.md`), keeps `CLAUDE.md` as the documented fallback for older versions, and
+  gains `muninn hooks install --agent claude --scope user|project`. Marked blocks stay for shared
+  files (`AGENTS.md`, `QWEN.md`, `.cursorrules`) and DSH declares `none`. `muninn doctor` derives its
+  rules and hook probes from the same descriptors instead of naming an agent in code.
+- **Consequences**: Adding an agent with a hook mechanism or a native rules slot is a registry entry.
+  Claude is at its best supported configuration without being the only privileged one, and the
+  installer no longer writes to a user-wide file without an explicit scope. Agents older than the
+  rules-directory support lose only the file channel; MCP initialize instructions still activate them.
+
+## ADR-33: The session brief is summary-first
+
+- **Date**: 2026-11-27
+- **Status**: Accepted and implemented
+- **Context**: The brief is the first thing a session reads, and it was spending its entire 8,000
+  character budget on full observation bodies: 45 decisions with no cap, plus twenty recent
+  activities, produced a truncated document that still cost about 2,000 tokens.
+- **Decision**: Render the brief as a map, not the archive. `detail: "summary"` (the default) keeps
+  the first 250 characters of the handoff state, the first 100 characters of its steps and questions,
+  a 75-character gist per decision, at most ten decisions, three recent activities and two global
+  preferences, and states how many decisions were omitted. `detail: "full"` restores the previous
+  rendering. `budgetChars: "all"` (ADR-28) implies `detail: "full"` unless the caller
+  asks otherwise, so an explicit uncapped request still returns every section in full. The
+  "Code graph" section renders the freshness line from ADR-31.
+- **Consequences**: On the measured project the brief drops from 8,011 truncated characters to 4,857
+  complete ones (about 1,200 tokens) while keeping continuity and the decision index. Readers reach
+  the omitted material with `muninn_search` or a topic key. The cap is a rendering concern only; the
+  library still returns every decision in `activeDecisions`.
+
+
+## ADR-34: Setup installs only the components the user selects
+
+- **Date**: 2026-11-27
+- **Status**: Accepted and implemented
+- **Context**: `muninn setup` wrote the portable configuration and the agent rules in addition to the
+  MCP entry the user asked for, with only `--no-rules` and `--no-portable` to opt out. Every write is
+  a change to a file the user owns, and an installer that decides on its own what is "helpful" makes
+  the cost invisible. Hooks were already separate (`muninn hooks install`), so the same explicit
+  model can cover the rest of the setup surface.
+- **Decision**: Add `--components <mcp,rules,portable|all>` (default `all`, preserving the documented
+  behavior) and apply it to status and writes alike; `--no-rules` and `--no-portable` narrow the same
+  selection instead of competing with it. Reject a selection that installs nothing or an unknown
+  component, and require `--agent` when the portable component is excluded. `setup` never installs
+  hooks; that stays an explicit second command.
+- **Consequences**: A user can install an MCP entry without touching rules or the portable file, or a
+  rules file without a portable entry. The default is still the full set, so existing scripts keep
+  working, but the full set is now a visible choice rather than an invisible side effect. Status
+  reports the same components it would write.

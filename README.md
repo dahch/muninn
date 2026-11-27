@@ -115,7 +115,9 @@ tree-sitter pack sit on top of the same store and never change this contract.
 ## Why Muninn
 
 - **Local and deterministic.** One SQLite file, no server, no embeddings, no network. Search is
-  FTS5 + BM25; the same input always produces the same brief and the same graph.
+  FTS5 + BM25 over a stemmed, diacritic-folded index, with prefix and trigram fallbacks for the
+  questions a strict conjunction would miss; the same input always produces the same brief and the
+  same graph.
 - **Identity that survives movement.** A committed uid (with Git remote and path fallbacks) keeps
   memory attached across moves, clones, worktrees and machines; memory lives outside the checkout,
   so it never dirties `git status`.
@@ -125,18 +127,22 @@ tree-sitter pack sit on top of the same store and never change this contract.
 - **A graph you can trust.** Derived, incremental and content-addressed. TypeScript/JavaScript use
   the Compiler API; ten more languages use optional tree-sitter WASM grammars and a deterministic
   heuristic fallback covers everything else, so no project is a blank graph. Every edge carries
-  confidence and resolution.
+  confidence and resolution. Freshness is reported, not assumed: the brief, `muninn_project status`
+  and `muninn doctor` say when the graph is stale, and the MCP server refreshes it incrementally
+  (debounced, bounded, `MUNINN_AUTO_INDEX=0` to disable) before answering graph questions.
 - **One engine, three surfaces.** The library, the CLI and the MCP server share `MemoryService`,
   the same storage rules and the same output contracts; thirteen MCP tools cover memory, graph,
   handoff and contract verification.
-- **Agent-agnostic activation.** `initialize` instructions, marked rules blocks, opt-in hooks and
-  `muninn doctor` explain and fix why an agent is not seeing the memory, without assuming any one
-  agent's format.
+- **Agent-agnostic activation.** `initialize` instructions, per-agent rules files (a marked block in
+  shared files, a dedicated file where the agent supports one), opt-in hooks and `muninn doctor`
+  explain and fix why an agent is not seeing the memory, without assuming any one agent's format.
 
 ## Overview
 
 - **Observations with categories** — `decision`, `convention`, `discovery`, `bugfix`,
-  `architecture` — searchable with SQLite **FTS5 + BM25** ranking.
+  `architecture` — searchable with SQLite **FTS5 + BM25** ranking. Queries run in tiers (exact
+  conjunction, prefix `OR`, trigram substring) and results are compact by default: identity, rank
+  and a short excerpt, with `detail: "full"` for whole bodies.
 - **Decision supersession** — saving a decision with `supersedesTopicKey` atomically marks the
   project's active decisions with that topic key as `superseded`, linking each to its replacement.
   Search and context hide superseded observations by default; pass `includeSuperseded` to see them.
@@ -170,7 +176,8 @@ tree-sitter pack sit on top of the same store and never change this contract.
   project-agnostic portable file at `{home}/.muninn/mcp.json`. It supports `--agent`, `--project`,
   `--list`, `--status`, `--dry-run`, `--force`, `--home`, and `--no-rules`, preserves unrelated
   configuration, and never modifies the legacy Huginn file. Codex TOML is merged safely, and selected
-  agents receive an idempotent marked rules block with legacy-block detection.
+  agents receive an idempotent rules block with legacy-block detection; destinations with a native
+  rules slot (Claude Code, Devin) get a dedicated file instead of a block inside a shared one.
 - **Local-first and self-contained** — no embeddings, no network, no server: one SQLite file
   and one process.
 
@@ -234,7 +241,8 @@ muninn check [files...] [--project <path>]
 muninn mcp run [--db <path>] [--project <path>]
 
 muninn setup [--list] [--agent <id|all|id,id>] [--project <path>] [--home <path>]
-             [--portable|--no-portable] [--no-rules] [--force] [--dry-run] [--status]
+             [--components <mcp,rules,portable|all>] [--portable|--no-portable]
+             [--no-rules] [--force] [--dry-run] [--status]
 ```
 
 Identity lives in `<project>/.muninn/project.json` (commit it: it is the uid that makes memory
@@ -295,11 +303,17 @@ wrapper, and does not create or initialize a database when called on a default s
 `muninn setup` manages the portable destination `{home}/.muninn/mcp.json` and the JSON- and
 TOML-format agent destinations in the catalog.
 
+Nothing is installed that was not selected: `--components` takes any of `mcp`, `rules` and
+`portable` (default: all three), and `--no-rules` / `--no-portable` narrow the same selection.
+Hooks are never installed by `setup`; they are the separate, opt-in `muninn hooks install`.
+
 ```sh
 muninn setup --list                              # print the catalog without writing
 muninn setup                                     # write/merge the portable entry
 muninn setup --agent cursor,pi --project .       # configure selected agents + portable
 muninn setup --agent all --project .             # every catalog destination + portable
+muninn setup --agent opencode --components mcp   # MCP entry only: no rules, no portable
+muninn setup --agent claude --components mcp,rules --project .  # MCP entry + rules file
 muninn setup --agent opencode --no-portable      # only the selected destination
 muninn setup --agent cursor --no-rules           # configure without installing rules
 muninn setup --status --agent claude --project . # selected agents + portable, read-only
@@ -337,8 +351,12 @@ region; unrelated content outside it is preserved where feasible. Malformed TOML
 table definitions, is reported with its path and cause, leaves the original untouched, and status
 continues to inspect the remaining destinations before exiting 1.
 
-Selected agents also receive a Markdown rules block delimited by `<!-- muninn:rules:start -->` and
-`<!-- muninn:rules:end -->`. It recommends `muninn_bootstrap` at session start (it carries the active
+Selected agents receive the same guidance in the form their catalog entry declares. Shared files
+(`AGENTS.md`, `QWEN.md`, `.cursorrules`) get a Markdown block delimited by
+`<!-- muninn:rules:start -->` and `<!-- muninn:rules:end -->`; destinations with a native rules slot
+get a dedicated file Muninn owns end to end — `.claude/rules/muninn.md` for Claude Code (v2.1.211+,
+with `CLAUDE.md` as the documented fallback for older versions) and
+`.windsurf/rules/muninn.md` for Devin. The rules recommend `muninn_bootstrap` at session start (it carries the active
 decisions and the last handoff), `muninn_search` / `muninn_explore` / `muninn_graph` before designing a
 change, `muninn_save` for anything settled, `muninn_handoff` before finishing, `muninn_project` with
 action `index` when the graph is stale, and `muninn_verify_contract` before completing code.
@@ -395,11 +413,14 @@ and the agent selects one with `muninn_project { action: "use" }`. Create the DS
 project root to make the binding fully automatic.
 
 **Activation.** The MCP `initialize` response carries project-aware instructions, and
-`muninn setup` installs a rules block that asks for `muninn_bootstrap`, `muninn_save` and
-`muninn_handoff`. Agents that support hooks can run `muninn hook session-start` (prints the brief)
-and `muninn hook session-end` (writes the handoff from git state); the contract is a command, so no
-per-agent format is assumed. For Claude Code, `muninn hooks install` merges those two commands into
-`~/.claude/settings.json` (opt-in, idempotent, and it never replaces unrelated hooks or settings). `muninn doctor` explains why an agent is not seeing the memory:
+`muninn setup` installs rules that ask for `muninn_bootstrap`, `muninn_save` and `muninn_handoff`.
+Agents that support hooks can run `muninn hook session-start` (prints the brief),
+`muninn hook session-end` (writes the handoff from git state) and `muninn hook after-edit` (refreshes
+the code graph); the contract is a command, so no per-agent format is assumed. `muninn hooks install
+--agent claude --scope user|project` merges those commands into the matching settings file (opt-in,
+idempotent, and it never replaces unrelated hooks or settings). Outside a hook, the MCP server itself
+keeps the graph fresh before answering graph questions. `muninn doctor` explains why an agent is not
+seeing the memory:
 missing entry, legacy `huginn` command, a pinned `--project`, or a runtime without MCP support
 (DSH Desktop reports this until an MCP plugin is installed in its profile).
 

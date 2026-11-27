@@ -87,7 +87,7 @@ Muninn is a standalone, local-first memory engine for coding agents and develope
 
 ### Search, indexing, synchronization, and statistics
 
-**REQ-6 — Preserve FTS5 search and recent context.** Search shall use SQLite FTS5 with safely sanitized queries and BM25 ranking. Context shall return recent observations. Both shall preserve project, category, topic, and all-project filtering and bounded result limits.
+**REQ-6 — Preserve FTS5 search and recent context.** Search shall use SQLite FTS5 with safely sanitized queries and BM25 ranking. Queries run in tiers: the historical conjunction first, a prefix-expanded disjunction when that page is incomplete, and a trigram substring tier when both are empty; `match` set to `all` keeps the strict conjunction. Results are compact by default with `detail: full` for whole bodies. Context shall return recent observations. Both shall preserve project, category, topic, and all-project filtering and bounded result limits.
 
 **AC-6**
 - Search uses FTS5 BM25 ranking, with lower rank values ordered first.
@@ -183,7 +183,7 @@ are flagged so affected tests can be reported). TypeScript and JavaScript shall 
 
 ### Agent setup catalog and command
 
-**REQ-17 — Provide a catalog of supported agent destinations.** Muninn shall define the setup catalog under `src/setup/` and integrate it with `src/commands/` and `src/cli.ts`. The catalog shall contain the 14 destinations `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`, `commandcode`, `omp`, `mcode`, `mimo`, and `dsh`. Each destination shall define an ID, label, format, MCP paths, and rules file, matching the routes and formats of the Huginn integrator reference. `dsh` is a `manual` destination: it has no mergeable MCP path and setup reports the `dsh-mcp` plugin steps instead.
+**REQ-17 — Provide a catalog of supported agent destinations.** Muninn shall define the setup catalog under `src/setup/` and integrate it with `src/commands/` and `src/cli.ts`. The catalog shall contain the 14 destinations `cursor`, `claude`, `opencode`, `devin`, `qwen`, `codex`, `agy`, `kimi`, `pi`, `commandcode`, `omp`, `mcode`, `mimo`, and `dsh`. Each destination shall define an ID, label, format, MCP paths, rules file, rules strategy (`dedicated`, `marked-block` or `none`) and, where the agent exposes one, a hooks descriptor, matching the routes and formats of the Huginn integrator reference. `dsh` is a `manual` destination: it has no mergeable MCP path and setup reports the `dsh-mcp` plugin steps instead.
 
 **AC-17**
 - Catalog IDs are unique and exactly cover the 14 listed destinations.
@@ -234,7 +234,7 @@ Setup shall include `--project <absolute path>` only for configuration files con
 
 ### Agent rules
 
-**REQ-21 — Install marked usage rules for selected agents.** When one or more agents are selected, setup shall install a Muninn rules block by default unless `--no-rules` is supplied. The block shall be delimited by `<!-- muninn:rules:start -->` and `<!-- muninn:rules:end -->`. The rules shall recommend calling `muninn_bootstrap` once at session start, using `muninn_search`, `muninn_explore` and `muninn_graph` before designing a change, recording settled knowledge with `muninn_save`, calling `muninn_handoff` before finishing, indexing through `muninn_project` when the graph is stale, and using `muninn_verify_contract` before completing code. They shall not mention Huginn.
+**REQ-21 — Install usage rules for selected agents.** When one or more agents are selected, setup shall install Muninn rules by default unless `--no-rules` is supplied. Shared files receive a block delimited by `<!-- muninn:rules:start -->` and `<!-- muninn:rules:end -->`; destinations whose catalog entry declares a dedicated rules slot receive a file Muninn owns (`.claude/rules/muninn.md` for Claude Code, `.windsurf/rules/muninn.md` for Devin). The rules shall recommend calling `muninn_bootstrap` once at session start, using `muninn_search`, `muninn_explore` and `muninn_graph` before designing a change, recording settled knowledge with `muninn_save`, calling `muninn_handoff` before finishing, indexing through `muninn_project` when the graph is stale, and using `muninn_verify_contract` before completing code. They shall not mention Huginn.
 
 **AC-21**
 - Installing the same rules twice is idempotent; the second run reports `changed: false`.
