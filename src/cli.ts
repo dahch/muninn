@@ -121,7 +121,7 @@ Usage:
   muninn doctor [--project <path>] [--json]
   muninn snapshot [--project <path>] [--file <path>]
   muninn restore [--project <path>] [--file <path>]
-  muninn hook <session-start|session-end> [--project <path>] [--budget <n>|all] [--all] [--json]
+  muninn hook <session-start|session-end|after-edit> [--project <path>] [--budget <n>|all] [--all] [--json]
   muninn hooks <status|install|uninstall> [--home <path>] [--dry-run] [--force]
   muninn end-session [--goal <t>] [--state <s>] [--next "a;b"] [--question "x;y"]
   muninn project resolve [path] [--json]
@@ -143,7 +143,7 @@ Commands:
   doctor   diagnose the project, memory, code graph and every agent configuration
   snapshot write a portable memory snapshot into <project>/.muninn/memory.jsonl
   restore  merge a snapshot back, idempotently by observation id
-  hook     agent-agnostic session-start / session-end hooks
+  hook     agent-agnostic session-start / session-end / after-edit hooks
   hooks    install or remove Claude Code session hooks (opt-in)
   end-session  close a session with a handoff (branch, changed files, next steps)
   project  resolve and manage portable project identity (resolve, list, register, rename, forget)

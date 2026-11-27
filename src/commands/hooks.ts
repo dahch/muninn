@@ -1,8 +1,10 @@
 /**
- * \`muninn hooks\` — install, inspect and remove Claude Code session hooks.
+ * \`muninn hooks\` — install, inspect and remove agent session hooks.
  *
  * This is deliberately separate from \`muninn setup\`: hooks modify a shared
  * settings file, so they are opt-in and never part of the default MCP setup.
+ * The agent, its settings path and its event plan come from the setup catalog,
+ * so adding an agent with a hook mechanism is a registry entry, not new code.
  */
 import os from "node:os";
 import path from "node:path";
@@ -13,18 +15,27 @@ import {
   uninstallHooks,
   type HooksReport,
 } from "../setup/hooks-target.js";
+import {
+  AGENT_REGISTRY,
+  isAgentId,
+  resolveHooksPath,
+  type AgentId,
+} from "../setup/registry.js";
 
 export function printHooksUsage(): void {
-  console.log("muninn hooks — Claude Code session hooks (opt-in)");
+  console.log("muninn hooks — agent session hooks (opt-in)");
   console.log("");
   console.log("Usage:");
-  console.log("  muninn hooks status [--home <path>] [--json]");
-  console.log("  muninn hooks install [--home <path>] [--dry-run] [--force] [--json]");
-  console.log("  muninn hooks uninstall [--home <path>] [--dry-run] [--json]");
+  console.log("  muninn hooks status [--agent <id>] [--scope user|project] [--home <path>] [--json]");
+  console.log("  muninn hooks install [--agent <id>] [--scope user|project] [--project <path>]");
+  console.log("                        [--home <path>] [--dry-run] [--force] [--json]");
+  console.log("  muninn hooks uninstall [--agent <id>] [--scope user|project] [--project <path>]");
+  console.log("                          [--home <path>] [--dry-run] [--json]");
   console.log("");
-  console.log("Hooks run 'muninn hook session-start' (prints the brief) and");
-  console.log("'muninn hook session-end' (writes the handoff). Only the Muninn");
-  console.log("commands are merged; unrelated settings and hooks are preserved.");
+  console.log("Hooks run 'muninn hook session-start' (prints the brief),");
+  console.log("'muninn hook session-end' (writes the handoff) and 'muninn hook after-edit'");
+  console.log("(refreshes the code graph once per turn). Only the Muninn commands are");
+  console.log("merged; unrelated settings and hooks are preserved.");
 }
 
 function printReport(report: HooksReport): void {
@@ -55,7 +66,39 @@ export async function handleHooksCommand(
     typeof args["--home"] === "string"
       ? path.resolve(args["--home"])
       : os.homedir();
-  const target = path.join(home, ".claude", "settings.json");
+  const agentArg =
+    typeof args["--agent"] === "string" ? args["--agent"] : "claude";
+  if (!isAgentId(agentArg)) {
+    console.error(chalk.red(`Unknown agent "${agentArg}".`));
+    process.exitCode = 1;
+    return;
+  }
+  const agent: AgentId = agentArg;
+  const scope = args["--scope"] === "project" ? "project" : "user";
+  const projectPath =
+    typeof args["--project"] === "string"
+      ? path.resolve(args["--project"])
+      : process.cwd();
+  if (!AGENT_REGISTRY[agent].hooks) {
+    console.error(
+      chalk.red(
+        `${AGENT_REGISTRY[agent].label} has no hook installer; use 'muninn hook' from its own hook mechanism.`
+      )
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const resolved = resolveHooksPath(agent, {
+    scope,
+    projectPath,
+    homeDir: home,
+  });
+  if (!resolved) {
+    console.error(chalk.red(`Cannot resolve the ${scope} settings path.`));
+    process.exitCode = 1;
+    return;
+  }
+  const target = resolved;
   const dryRun = Boolean(args["--dry-run"]);
   const json = Boolean(args["--json"]);
 

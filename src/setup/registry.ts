@@ -11,6 +11,27 @@ import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 
 export type AgentFormat = "mcpServers" | "opencode" | "toml" | "manual";
 
+/**
+ * How Muninn owns an agent's rules file.
+ *
+ * - `marked-block`: the file belongs to the user and Muninn manages one delimited
+ *   block inside it (AGENTS.md and friends).
+ * - `dedicated`: the file exists only for Muninn (``.windsurf/rules/muninn.md``,
+ *   ``.claude/rules/muninn.md``), so the whole file is written and replaced.
+ * - `none`: the agent has no rules mechanism; the MCP instructions activate it.
+ */
+export type RulesStrategy = "marked-block" | "dedicated" | "none";
+
+/** Agent-specific hook installer descriptor, when the agent has one. */
+export interface AgentHooks {
+  /** Settings file for every project on the machine. */
+  userPathTemplate: string;
+  /** Settings file inside the project (committable). */
+  projectPathTemplate: string;
+  /** Events the installer merges. */
+  events: Array<{ event: "SessionStart" | "SessionEnd" | "Stop"; command: string }>;
+}
+
 export type AgentId =
   | "cursor"
   | "claude"
@@ -35,6 +56,10 @@ export interface AgentTarget {
   mcpPaths: string[];
   /** Rules-file path relative to the project root. */
   rulesFile: string;
+  /** Ownership model for that file. */
+  rulesStrategy: RulesStrategy;
+  /** Hook installer, when the agent exposes one. */
+  hooks?: AgentHooks;
   /**
    * CLI binary used only for the nonfatal `not installed` diagnostic.
    * `null` means the target has no meaningful local executable (for example an
@@ -57,6 +82,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{project}/.cursor/mcp.json", "{home}/.cursor/mcp.json"],
     rulesFile: ".cursorrules",
+    rulesStrategy: "marked-block",
     executable: null,
   },
   claude: {
@@ -68,7 +94,20 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
       "{home}/.claude.json",
       "{home}/.claude/claude_desktop_config.json",
     ],
-    rulesFile: "CLAUDE.md",
+    // Claude Code reads .claude/rules/*.md at the same priority as
+    // .claude/CLAUDE.md (v2.1.211+), so Muninn owns a file instead of editing the
+    // user's CLAUDE.md. MCP initialize instructions remain the fallback.
+    rulesFile: ".claude/rules/muninn.md",
+    rulesStrategy: "dedicated",
+    hooks: {
+      userPathTemplate: "{home}/.claude/settings.json",
+      projectPathTemplate: "{project}/.claude/settings.json",
+      events: [
+        { event: "SessionStart", command: "muninn hook session-start" },
+        { event: "SessionEnd", command: "muninn hook session-end --agent claude" },
+        { event: "Stop", command: "muninn hook after-edit --quiet" },
+      ],
+    },
     executable: "claude",
   },
   opencode: {
@@ -77,6 +116,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "opencode",
     mcpPaths: ["{opencodeConfigDir}/opencode.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "opencode",
   },
   devin: {
@@ -85,6 +125,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{project}/.devin/mcp_config.json", "{home}/.config/devin/mcp_config.json"],
     rulesFile: ".windsurf/rules/muninn.md",
+    rulesStrategy: "dedicated",
     executable: null,
   },
   qwen: {
@@ -93,6 +134,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.qwen/settings.json"],
     rulesFile: "QWEN.md",
+    rulesStrategy: "marked-block",
     executable: "qwen",
   },
   codex: {
@@ -101,6 +143,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "toml",
     mcpPaths: ["{home}/.codex/config.toml"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "codex",
   },
   agy: {
@@ -109,6 +152,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.gemini/config/mcp_config.json", "{project}/.agents/mcp_config.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "agy",
   },
   kimi: {
@@ -117,6 +161,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.kimi-code/mcp.json", "{project}/.kimi/mcp.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "kimi",
   },
   pi: {
@@ -125,6 +170,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.pi/agent/mcp.json", "{project}/.pi/mcp.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "pi",
   },
   commandcode: {
@@ -133,6 +179,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.commandcode/mcp.json", "{project}/.mcp.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "commandcode",
   },
   omp: {
@@ -141,6 +188,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{home}/.omp/mcp.json", "{project}/.omp/mcp.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "omp",
   },
   mcode: {
@@ -149,6 +197,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "mcpServers",
     mcpPaths: ["{project}/.mcp.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "mcode",
   },
   mimo: {
@@ -157,6 +206,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     format: "opencode",
     mcpPaths: ["{home}/.config/mimocode/mimocode.json"],
     rulesFile: "AGENTS.md",
+    rulesStrategy: "marked-block",
     executable: "mimo",
   },
   dsh: {
@@ -167,6 +217,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentTarget> = {
     // there is no path to merge; setup reports the manual steps instead.
     mcpPaths: [],
     rulesFile: "",
+    rulesStrategy: "none",
     executable: null,
   },
 };
@@ -257,6 +308,25 @@ export function resolveMcpPaths(
     );
   }
   return templates.map((template) => expandTemplate(template, options));
+}
+
+/** Resolve the hook settings file for an agent, scope and project. */
+export function resolveHooksPath(
+  target: AgentId | AgentTarget,
+  options: { scope?: "user" | "project"; projectPath?: string; homeDir?: string } = {},
+): string | null {
+  const spec = typeof target === "string" ? AGENT_REGISTRY[target] : target;
+  const hooks = spec.hooks;
+  if (!hooks) return null;
+  const scope = options.scope ?? "user";
+  if (scope === "project" && options.projectPath === undefined) return null;
+  const template =
+    scope === "project" ? hooks.projectPathTemplate : hooks.userPathTemplate;
+  if (scope === "project" && options.projectPath === undefined) return null;
+  return expandTemplate(template, {
+    projectPath: options.projectPath,
+    homeDir: options.homeDir,
+  });
 }
 
 /** Rules path under the selected project root (or the catalog path without one). */

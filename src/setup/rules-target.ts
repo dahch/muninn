@@ -8,20 +8,17 @@
  * cannot be determined.
  */
 import fs from "node:fs";
-import { resolve } from "node:path";
+import path, { resolve } from "node:path";
 import { assertDocPath, checkDocPath, lstatOrUndefined } from "../util/path-safety.js";
 import { safeWriteAtomic } from "./portable.js";
-import type { AgentId } from "./registry.js";
+import type { AgentId, RulesStrategy } from "./registry.js";
 
 export const MUNINN_RULES_START = "<!-- muninn:rules:start -->";
 export const MUNINN_RULES_END = "<!-- muninn:rules:end -->";
 export const LEGACY_RULES_START = "<!-- huginn:muninn-rules:start -->";
 export const LEGACY_RULES_END = "<!-- huginn:muninn-rules:end -->";
 
-export const MUNINN_RULES_BLOCK = [
-  MUNINN_RULES_START,
-  "## Muninn project memory",
-  "",
+const RULES_BULLETS = [
   "- Call `muninn_bootstrap` once at the start of a session to load the project brief. It includes",
   "  the active decisions and where the last session stopped.",
   "- Before designing a change, use `muninn_search`, `muninn_explore` and `muninn_graph` instead of",
@@ -35,6 +32,26 @@ export const MUNINN_RULES_BLOCK = [
   "  re-reading the project.",
   "- If the code index is empty or stale, call `muninn_project` with action `index`.",
   "- Before completing code, use `muninn_verify_contract` to verify the execution contract.",
+];
+
+/**
+ * Content of a file Muninn owns end to end. No markers are needed because there
+ * is no user prose to preserve; the heading is the ownership signal.
+ */
+export const MUNINN_DEDICATED_RULES = [
+  "# Muninn project memory",
+  "",
+  ...RULES_BULLETS,
+  "",
+].join("\n");
+
+export const MUNINN_DEDICATED_HEADING = "# Muninn project memory";
+
+export const MUNINN_RULES_BLOCK = [
+  MUNINN_RULES_START,
+  "## Muninn project memory",
+  "",
+  ...RULES_BULLETS,
   MUNINN_RULES_END,
 ].join("\n");
 
@@ -47,6 +64,8 @@ export interface RulesTargetOptions {
   projectPath?: string;
   force?: boolean;
   dryRun?: boolean;
+  /** Ownership model; defaults to a marked block inside a user file. */
+  strategy?: RulesStrategy;
 }
 
 export interface RulesTargetStatus {
@@ -158,6 +177,25 @@ function inspectRules(options: RulesTargetOptions): Inspection {
       ...base,
       path: check.path,
       state: "malformed",
+      error,
+      errors: [error],
+    };
+  }
+
+  if ((options.strategy ?? "marked-block") === "dedicated") {
+    const trimmed = raw.trim();
+    if (trimmed === MUNINN_DEDICATED_RULES.trim()) {
+      return { ...base, path: check.path, state: "present", raw };
+    }
+    if (trimmed.startsWith(MUNINN_DEDICATED_HEADING)) {
+      return { ...base, path: check.path, state: "stale", raw };
+    }
+    const error = `${label} ${check.path} exists but is not a Muninn-owned rules file; refusing to overwrite it (move it or use --force)`;
+    return {
+      ...base,
+      path: check.path,
+      state: "malformed",
+      raw,
       error,
       errors: [error],
     };
@@ -283,8 +321,61 @@ export function getRulesTargetStatus(options: RulesTargetOptions): RulesTargetSt
   };
 }
 
+function writeDedicatedRules(
+  options: RulesTargetOptions,
+  inspected: Inspection,
+  dryRun: boolean
+): RulesTargetReport {
+  const base = {
+    path: inspected.path,
+    agents: inspected.agents,
+    state: inspected.state,
+    dryRun,
+    errors: inspected.errors,
+  };
+  if (inspected.state === "malformed") {
+    return { ...base, outcome: "failed", changed: false, error: inspected.error };
+  }
+  if (inspected.state === "present") {
+    return { ...base, outcome: "present", changed: false };
+  }
+  if (dryRun) {
+    return {
+      ...base,
+      state: "present",
+      outcome: "written",
+      changed: true,
+    };
+  }
+  try {
+    const screen = checkDocPath(inspected.path, {
+      label: "the Muninn rules file",
+      action: "write",
+      projectPath: options.projectPath,
+    });
+    if (!screen.ok) {
+      return { ...base, outcome: "failed", changed: false, error: screen.reason };
+    }
+    fs.mkdirSync(path.dirname(screen.path), { recursive: true, mode: 0o700 });
+    const existing = lstatOrUndefined(screen.path);
+    const mode = existing ? existing.mode & 0o777 : 0o644;
+    safeWriteAtomic(screen.path, MUNINN_DEDICATED_RULES, mode);
+  } catch (err) {
+    return {
+      ...base,
+      outcome: "failed",
+      changed: false,
+      error: (err as Error).message,
+    };
+  }
+  return { ...base, state: "present", outcome: "written", changed: true };
+}
+
 export function setupRulesTarget(options: RulesTargetOptions): RulesTargetReport {
   const inspected = inspectRules(options);
+  if ((options.strategy ?? "marked-block") === "dedicated") {
+    return writeDedicatedRules(options, inspected, options.dryRun === true);
+  }
   const dryRun = options.dryRun === true;
   const base = {
     path: inspected.path,

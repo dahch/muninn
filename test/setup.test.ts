@@ -592,6 +592,9 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
       "{home}/.claude/claude_desktop_config.json",
     ]);
     expect(AGENT_REGISTRY.cursor.rulesFile).toBe(".cursorrules");
+    expect(AGENT_REGISTRY.claude.rulesStrategy).toBe("dedicated");
+    expect(AGENT_REGISTRY.devin.rulesStrategy).toBe("dedicated");
+    expect(AGENT_REGISTRY.dsh.rulesStrategy).toBe("none");
     expect(AGENT_REGISTRY.codex.format).toBe("toml");
     expect(AGENT_REGISTRY.mimo.format).toBe("opencode");
   });
@@ -603,6 +606,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{project}/.cursor/mcp.json", "{home}/.cursor/mcp.json"],
         rulesFile: ".cursorrules",
+        rulesStrategy: "marked-block",
         executable: null,
       },
       claude: {
@@ -613,7 +617,17 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
           "{home}/.claude.json",
           "{home}/.claude/claude_desktop_config.json",
         ],
-        rulesFile: "CLAUDE.md",
+        rulesFile: ".claude/rules/muninn.md",
+        rulesStrategy: "dedicated",
+        hooks: {
+          userPathTemplate: "{home}/.claude/settings.json",
+          projectPathTemplate: "{project}/.claude/settings.json",
+          events: [
+            { event: "SessionStart", command: "muninn hook session-start" },
+            { event: "SessionEnd", command: "muninn hook session-end --agent claude" },
+            { event: "Stop", command: "muninn hook after-edit --quiet" },
+          ],
+        },
         executable: "claude",
       },
       opencode: {
@@ -621,6 +635,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "opencode",
         mcpPaths: ["{opencodeConfigDir}/opencode.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "opencode",
       },
       devin: {
@@ -628,6 +643,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{project}/.devin/mcp_config.json", "{home}/.config/devin/mcp_config.json"],
         rulesFile: ".windsurf/rules/muninn.md",
+        rulesStrategy: "dedicated",
         executable: null,
       },
       qwen: {
@@ -635,6 +651,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{home}/.qwen/settings.json"],
         rulesFile: "QWEN.md",
+        rulesStrategy: "marked-block",
         executable: "qwen",
       },
       codex: {
@@ -642,6 +659,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "toml",
         mcpPaths: ["{home}/.codex/config.toml"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "codex",
       },
       agy: {
@@ -649,6 +667,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{home}/.gemini/config/mcp_config.json", "{project}/.agents/mcp_config.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "agy",
       },
       kimi: {
@@ -656,6 +675,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{home}/.kimi-code/mcp.json", "{project}/.kimi/mcp.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "kimi",
       },
       pi: {
@@ -663,6 +683,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{home}/.pi/agent/mcp.json", "{project}/.pi/mcp.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "pi",
       },
       commandcode: {
@@ -670,6 +691,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{home}/.commandcode/mcp.json", "{project}/.mcp.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "commandcode",
       },
       omp: {
@@ -677,6 +699,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{home}/.omp/mcp.json", "{project}/.omp/mcp.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "omp",
       },
       mcode: {
@@ -684,6 +707,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "mcpServers",
         mcpPaths: ["{project}/.mcp.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "mcode",
       },
       mimo: {
@@ -691,6 +715,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "opencode",
         mcpPaths: ["{home}/.config/mimocode/mimocode.json"],
         rulesFile: "AGENTS.md",
+        rulesStrategy: "marked-block",
         executable: "mimo",
       },
       dsh: {
@@ -698,6 +723,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
         format: "manual",
         mcpPaths: [],
         rulesFile: "",
+        rulesStrategy: "none",
         executable: null,
       },
     } as const;
@@ -727,7 +753,7 @@ describe("JSON agent catalog and setup (Iteration 2)", () => {
       resolveMcpPaths("opencode", { homeDir: home, opencodeConfigDir: opencodeDir }),
     ).toEqual([path.join(opencodeDir, "opencode.json")]);
     expect(resolveRulesPath("claude", { projectPath: project })).toBe(
-      path.join(project, "CLAUDE.md"),
+      path.join(project, ".claude", "rules", "muninn.md"),
     );
   });
 
