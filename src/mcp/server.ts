@@ -11,6 +11,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { sanitizeTerminalText } from "../util/text.js";
+import { extractSearchTerms } from "../service/search-plan.js";
+import { compactObservation, compactSearchResults } from "./compact.js";
+import { compactToolSchema } from "./schema-compact.js";
 import {
   MemoryService,
   VALID_CATEGORIES,
@@ -41,6 +44,7 @@ import {
 } from "../project/session.js";
 import {
   buildExplore,
+  checkIndexFreshness,
   findImportCycles,
   findSymbol,
   getAffectedTests,
@@ -95,6 +99,14 @@ export const CategorySchema = z
 /**
  * Zod schema for muninn_save tool arguments.
  */
+const DetailSchema = z
+  .enum(["compact", "full"])
+  .nullish()
+  .default("compact")
+  .describe(
+    "Response shape: compact returns identity, rank and a short excerpt; full returns the whole observation body (default compact)"
+  );
+
 export const MuninnSaveSchema = z.object({
   category: CategorySchema,
   title: z
@@ -204,6 +216,11 @@ export const MuninnSearchSchema = z.object({
     .boolean()
     .nullish()
     .describe("Whether to include cross-project global observations (default false, snake_case)"),
+  detail: DetailSchema,
+  match: z
+    .enum(["smart", "all"])
+    .nullish()
+    .describe("smart adds prefix and substring fallbacks; all is strict"),
 });
 
 export type MuninnSearchInput = z.infer<typeof MuninnSearchSchema>;
@@ -247,6 +264,7 @@ export const MuninnContextSchema = z.object({
     .boolean()
     .nullish()
     .describe("Whether to include cross-project global observations (default false, snake_case)"),
+  detail: DetailSchema,
 });
 
 export type MuninnContextInput = z.infer<typeof MuninnContextSchema>;
@@ -367,6 +385,10 @@ export const MuninnBootstrapSchema = z.object({
     .describe(
       `Render the complete brief: shorthand for budgetChars "${SESSION_BRIEF_ALL_BUDGET}". Lifts the character budget and the per-section row limits`
     ),
+  detail: z
+    .enum(["summary", "full"])
+    .nullish()
+    .describe("summary keeps a short gist per item; full renders complete bodies"),
   expandGraph: z
     .boolean()
     .nullish()
@@ -643,28 +665,38 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_save: {
     name: "muninn_save",
     description:
-      "Save an observation (decision, convention, discovery, bugfix, architecture) to Muninn memory with optional linked entities.",
+      "Save a decision, convention, discovery, bugfix or architecture note.",
     schema: MuninnSaveSchema,
     handler: (service, input) => service.saveObservation(input),
   },
   muninn_search: {
     name: "muninn_search",
     description:
-      "Search observations in Muninn memory using full-text search with BM25 ranking.",
+      "Search memory with prefix and substring fallback; compact by default.",
     schema: MuninnSearchSchema,
-    handler: (service, input) => service.search(input),
+    handler: (service, input) => {
+      const results = service.search(input);
+      if ((input.detail ?? "compact") === "full") return results;
+      return compactSearchResults(results, extractSearchTerms(input.query));
+    },
   },
   muninn_context: {
     name: "muninn_context",
     description:
-      "Retrieve recent observations and context from Muninn memory, optionally filtered by category or topic.",
+      "Recent observations, optionally by category or topic.",
     schema: MuninnContextSchema,
-    handler: (service, input) => service.getContext(input),
+    handler: (service, input) => {
+      const observations = service.getContext(input);
+      if ((input.detail ?? "compact") === "full") return observations;
+      return observations.map((observation) =>
+        compactObservation(observation, [])
+      );
+    },
   },
   muninn_link_symbol: {
     name: "muninn_link_symbol",
     description:
-      "Link a code entity/symbol to an existing observation in Muninn memory.",
+      "Link a code symbol to an observation.",
     schema: MuninnLinkSymbolSchema,
     handler: (service, input) =>
       service.linkSymbol(
@@ -675,7 +707,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_stats: {
     name: "muninn_stats",
     description:
-      "Get memory statistics (counts of projects, observations, entities, and links).",
+      "Memory counts: projects, observations, entities, links.",
     schema: MuninnStatsSchema,
     handler: (service, input) =>
       input.allProjects
@@ -685,7 +717,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_inspect_symbol: {
     name: "muninn_inspect_symbol",
     description:
-      "Inspect a code entity/symbol in Muninn memory, returning its definition, file location, dependencies (imports, extends, calls), bounded depth-1 graph neighbors, and linked observations.",
+      "Inspect one symbol: location, dependencies, neighbors, notes.",
     schema: MuninnInspectSymbolSchema,
     handler: (service, input) => {
       const projectId =
@@ -707,19 +739,20 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_bootstrap: {
     name: "muninn_bootstrap",
     description:
-      "Build a bounded, deterministic read-only session brief with project identity, active decisions, recent activity, path-selected indexed symbols, counts, and notes.",
+      "Session brief: project, handoff, decisions, graph freshness, counts.",
     schema: MuninnBootstrapSchema,
     handler: (service, input) =>
       service.getSessionBrief({
         paths: input.paths ?? undefined,
         budgetChars: briefBudgetFromInput(input),
         expandGraph: input.expandGraph ?? input.expand_graph,
+        detail: input.detail ?? undefined,
       }).markdown,
   },
   muninn_handoff: {
     name: "muninn_handoff",
     description:
-      "Save, read or close the project's session handoff: the structured 'where we left off' record (goal, state, next steps, open questions, blockers) that lets a new session in any agent start without re-reading the repository.",
+      "Save, read or close the session handoff.",
     schema: MuninnHandoffSchema,
     handler: (service, input) => {
       const action = input.action ?? "checkpoint";
@@ -754,7 +787,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_project: {
     name: "muninn_project",
     description:
-      "Resolve which project a directory belongs to, switch the active project when the working directory is not the project, or list known projects and their portable storage.",
+      "Resolve or switch the project; index it; report freshness.",
     schema: MuninnProjectSchema,
     handler: (service, input) => {
       const context = resolveProjectContext({
@@ -789,7 +822,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_explore: {
     name: "muninn_explore",
     description:
-      "One call to understand code: rank symbols for a question and return their verbatim source, callers, callees and related decisions, bounded by a character budget. Use it instead of reading many files.",
+      "Understand code in one call: ranked symbols, source, callers, callees.",
     schema: MuninnExploreSchema,
     handler: (service, input) =>
       buildExplore(
@@ -803,7 +836,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_graph: {
     name: "muninn_graph",
     description:
-      "Query the code graph: node (source + direct edges), callers, callees, impact radius, implementations, file imports, import cycles, affected tests, or the indexed file tree.",
+      "Query the code graph: node, callers, callees, impact, cycles, tests.",
     schema: MuninnGraphSchema,
     handler: (service, input) => {
       const db = service.db;
@@ -889,7 +922,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_code_search: {
     name: "muninn_code_search",
     description:
-      "Search indexed symbols and files by name, kind or language with full-text ranking. Fast way to locate code without grepping the repository.",
+      "Find symbols or files by name, with stemming and subwords.",
     schema: MuninnCodeSearchSchema,
     handler: (service, input) => ({
       symbols: searchSymbols(service.db, service.currentProject.id, input.query, {
@@ -902,7 +935,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   muninn_verify_contract: {
     name: "muninn_verify_contract",
     description:
-      "Verify TypeScript compilation execution contracts for project files, returning diagnostics, exact line/character positions, and visual snippets.",
+      "Type-check project files; return diagnostics with snippets.",
     schema: MuninnVerifyContractSchema,
     handler: (service, input) => {
       const baseDir = path.resolve(
@@ -933,9 +966,10 @@ export const MUNINN_TOOLS: Tool[] = Object.values(TOOL_REGISTRY).map(
   (tool) => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: z.toJSONSchema(tool.schema, {
-      unrepresentable: "any",
-    }) as Tool["inputSchema"],
+    inputSchema: compactToolSchema(
+      z.toJSONSchema(tool.schema, { unrepresentable: "any" }) as Record<string, unknown>,
+      tool.name
+    ) as Tool["inputSchema"],
   })
 );
 
@@ -1239,6 +1273,50 @@ export class BoundedStdioServerTransport extends StdioServerTransport {
  * file or choosing to call a tool: every MCP client receives the project name,
  * the root, and the four rules before the first prompt.
  */
+/** Tools whose answers come from the derived code graph. */
+const GRAPH_TOOLS = new Set([
+  "muninn_explore",
+  "muninn_graph",
+  "muninn_code_search",
+  "muninn_inspect_symbol",
+]);
+
+/** Do not probe the filesystem more than once per window per project. */
+const AUTO_INDEX_MIN_INTERVAL_MS = 10_000;
+/** Refuse to auto-index a cold or massively stale graph; the agent is told instead. */
+export const AUTO_INDEX_MAX_STALE_FILES = 500;
+const autoIndexChecks = new Map<string, number>();
+
+/**
+ * Keep the graph fresh without making the agent ask. The MCP server is the only
+ * activation path every supported agent shares, so the refresh lives here: a
+ * cheap fingerprint probe, a debounce window, a bounded incremental pass, and a
+ * hard skip when the index is cold or too far behind.
+ */
+export async function maybeAutoIndex(
+  service: IMemoryService,
+  toolName: string,
+  options: { now?: number; force?: boolean } = {}
+): Promise<"skipped" | "fresh" | "indexed" | "blocked"> {
+  if (process.env.MUNINN_AUTO_INDEX === "0") return "skipped";
+  if (!GRAPH_TOOLS.has(toolName)) return "skipped";
+  const projectId = service.currentProject.id;
+  const now = options.now ?? Date.now();
+  const last = autoIndexChecks.get(projectId) ?? 0;
+  if (!options.force && now - last < AUTO_INDEX_MIN_INTERVAL_MS) return "skipped";
+  autoIndexChecks.set(projectId, now);
+  try {
+    const freshness = checkIndexFreshness(service);
+    if (freshness.files === 0) return "skipped";
+    if (freshness.fresh) return "fresh";
+    if (freshness.staleFiles > AUTO_INDEX_MAX_STALE_FILES) return "blocked";
+    await indexProject(service, { mode: "changed" });
+    return "indexed";
+  } catch {
+    return "skipped";
+  }
+}
+
 export function buildServerInstructions(
   projectRoot?: string,
   sessionAware = false
@@ -1495,7 +1573,11 @@ export function createMcpServer(
           graph: databaseExists
             ? (() => {
                 try {
-                  return getIndexStatus(getService());
+                  const indexService = getService();
+                  return {
+                    ...getIndexStatus(indexService),
+                    freshness: checkIndexFreshness(indexService),
+                  };
                 } catch {
                   return null;
                 }
@@ -1546,6 +1628,7 @@ export function createMcpServer(
         };
       }
 
+      await maybeAutoIndex(getService(), name);
       const result = await tool.handler(getService(), parsed.data);
       return {
         content: [

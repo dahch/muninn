@@ -4,6 +4,8 @@ import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { assertDocPath } from "../util/path-safety.js";
 import { plural } from "../util/plural.js";
+import { planSearchQuery } from "./search-plan.js";
+import { checkIndexFreshness } from "../graph/indexer.js";
 import {
   deriveProjectUid,
   globalMemoryDbPath,
@@ -149,10 +151,35 @@ export interface SearchOptions {
   includeGlobal?: boolean | null;
   include_global?: boolean | null;
   limit?: number | null;
+  /**
+   * `smart` (default) runs the exact tier and falls back to prefix and substring
+   * tiers. `all` keeps the strict conjunction only.
+   */
+  match?: "smart" | "all" | null;
 }
 
 export interface SearchResult extends ObservationWithEntities {
   rank: number;
+}
+
+export interface DedupEntry {
+  kept: string;
+  superseded: string;
+  title: string;
+  reason: "seeded-copy" | "identical-content";
+}
+
+export interface DedupReport {
+  dryRun: boolean;
+  groups: number;
+  superseded: number;
+  entries: DedupEntry[];
+}
+
+export interface DedupOptions {
+  projectId?: string | null;
+  project_id?: string | null;
+  dryRun?: boolean | null;
 }
 
 export interface ContextOptions {
@@ -255,11 +282,15 @@ export interface SymbolNeighbors {
   truncated: boolean;
 }
 
+export type SessionBriefDetail = "summary" | "full";
+
 export interface SessionBriefOptions {
   paths?: string[] | null;
   /** A character limit, or `"all"` for the complete, uncapped brief. */
   budgetChars?: SessionBriefBudget | null;
   expandGraph?: boolean | null;
+  /** "summary" (default) keeps the first 240 characters of each body. */
+  detail?: SessionBriefDetail | null;
 }
 
 export interface SessionBriefRequest extends SessionBriefOptions {
@@ -302,9 +333,23 @@ export interface SessionBriefContent {
   handoff?: Handoff | null;
   /** Cross-project `scope = global` observations, when the store exists. */
   globalObservations?: Observation[];
+  /** Derived code-graph fingerprint and freshness, when an index exists. */
+  codeGraph?: SessionBriefCodeGraph | null;
   counts: SessionBriefCounts;
   notes: string[];
   budgetChars: SessionBriefBudget;
+  detail: SessionBriefDetail;
+}
+
+export interface SessionBriefCodeGraph {
+  files: number;
+  symbols: number;
+  edges: number;
+  indexedAt: string | null;
+  ageSeconds: number | null;
+  staleFiles: number;
+  fresh: boolean;
+  reason: string;
 }
 
 export interface SessionBrief extends SessionBriefContent {
@@ -334,6 +379,7 @@ export interface IMemoryService {
   saveObservation(input: SaveObservationInput): ObservationWithEntities;
   search(options: SearchOptions): SearchResult[];
   getContext(options?: ContextOptions): ObservationWithEntities[];
+  dedupObservations(options?: DedupOptions): DedupReport;
   linkSymbol(
     inputOrObsId: LinkSymbolInput | string,
     symbol?: SymbolInput | string
@@ -513,6 +559,71 @@ export function sanitizeFtsQuery(query: string): string {
   return terms.join(" ");
 }
 
+interface SearchFilter {
+  category: string | null;
+  activeOnly: boolean;
+  projectId: string | null;
+}
+
+/** Storage failures that must never be swallowed by a fallback tier. */
+function isFatalSqliteError(err: unknown): boolean {
+  const code =
+    typeof err === "object" && err !== null && "code" in err
+      ? String((err as { code?: unknown }).code)
+      : "";
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    code.startsWith("SQLITE_IOERR") ||
+    code.startsWith("SQLITE_CORRUPT") ||
+    code === "SQLITE_NOTADB" ||
+    code === "SQLITE_FULL" ||
+    code === "SQLITE_CANTOPEN" ||
+    /disk i\/o|corrupt|not a database|disk is full/i.test(message)
+  );
+}
+
+/**
+ * Append broad-tier rows after exact-tier rows. Exact rows keep their BM25 order;
+ * appended rows receive a monotonic rank just worse than the last exact row so
+ * the reported rank always agrees with the returned order.
+ */
+function mergeSearchRows<T extends { id: string; rank: number }>(
+  exact: T[],
+  broad: T[]
+): T[] {
+  if (broad.length === 0) return exact;
+  if (exact.length === 0) return broad.slice();
+  const seen = new Set(exact.map((row) => row.id));
+  const base = Math.max(...exact.map((row) => row.rank));
+  const merged = exact.slice();
+  let offset = 0;
+  for (const row of broad) {
+    if (seen.has(row.id)) continue;
+    offset += 1;
+    merged.push({ ...row, rank: base + offset / 1_000 });
+  }
+  return merged;
+}
+
+function normalizeForDuplicateCheck(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+/** Collapse observations with identical title and content, keeping the first. */
+function collapseDuplicateRows<T extends { title: string; content: string }>(
+  rows: T[]
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const row of rows) {
+    const key = `${normalizeForDuplicateCheck(row.title)}\u0000${normalizeForDuplicateCheck(row.content)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
 function sessionBriefError(err: unknown): string {
   if (err instanceof Error && err.message.trim()) return err.message.trim();
   const message = String(err).trim();
@@ -544,6 +655,18 @@ export function resolveSessionBriefBudget(
     );
   }
   return budget;
+}
+
+/**
+ * "all" is an explicit request for the complete brief, so it also means full
+ * bodies unless the caller asked for a summary explicitly.
+ */
+function resolveSessionBriefDetail(
+  detail: SessionBriefDetail | null | undefined,
+  budget: SessionBriefBudget
+): SessionBriefDetail {
+  if (detail === "full" || detail === "summary") return detail;
+  return budget === SESSION_BRIEF_ALL_BUDGET ? "full" : "summary";
 }
 
 /**
@@ -925,10 +1048,32 @@ function formatCount(count: number | null): string {
   return count === null ? "unavailable" : String(count);
 }
 
+function formatGraphAge(ageSeconds: number | null): string | null {
+  if (ageSeconds === null) return null;
+  if (ageSeconds < 90) return `${ageSeconds}s ago`;
+  const minutes = Math.round(ageSeconds / 60);
+  if (minutes < 90) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+/** First line of a body, bounded, for the summary rendering of the brief. */
+function briefSummary(content: string, maxChars = 150): string {
+  const flat = content.replace(/\s+/g, " ").trim();
+  if (flat.length <= maxChars) return flat;
+  const cut = flat.slice(0, maxChars);
+  const lastSpace = cut.lastIndexOf(" ");
+  const body = lastSpace > maxChars * 0.6 ? cut.slice(0, lastSpace) : cut;
+  return `${body.trim()} …`;
+}
+
 function appendBriefObservation(
   lines: string[],
   observation: Observation,
-  labelSuperseded: boolean
+  labelSuperseded: boolean,
+  detail: SessionBriefDetail = "summary",
+  summaryChars = 150
 ): void {
   const supersededLabel =
     labelSuperseded && observation.status === "superseded"
@@ -944,10 +1089,13 @@ function appendBriefObservation(
   if (observation.topic_key) {
     lines.push(`  Topic key: \`${observation.topic_key}\``);
   }
-  const contentLines = observation.content.split(/\r?\n/);
-  for (const contentLine of contentLines) {
-    lines.push(`  ${contentLine}`);
+  if (detail === "full") {
+    for (const contentLine of observation.content.split(/\r?\n/)) {
+      lines.push(`  ${contentLine}`);
+    }
+    return;
   }
+  lines.push(`  ${briefSummary(observation.content, summaryChars)}`);
 }
 
 function buildSessionBriefMarkdown(content: SessionBriefContent): string {
@@ -969,7 +1117,13 @@ function buildSessionBriefMarkdown(content: SessionBriefContent): string {
     const handoff = content.handoff;
     lines.push("", "## Where we left off");
     lines.push(`- Goal: ${handoff.goal}`);
-    lines.push(`- State: ${handoff.state}`);
+    lines.push(
+      `- State: ${
+        (content.detail ?? "summary") === "summary"
+          ? briefSummary(handoff.state, 250)
+          : handoff.state
+      }`
+    );
     if (handoff.agent) lines.push(`- Agent: ${handoff.agent}`);
     if (handoff.session_id) lines.push(`- Session: ${handoff.session_id}`);
     if (handoff.branch) lines.push(`- Branch: ${handoff.branch}`);
@@ -977,15 +1131,31 @@ function buildSessionBriefMarkdown(content: SessionBriefContent): string {
       lines.push(`- Files touched: ${handoff.files_touched.join(", ")}`);
     }
     if (handoff.next_steps.length > 0) {
+      const summaryMode = (content.detail ?? "summary") === "summary";
+      const steps = summaryMode
+        ? handoff.next_steps.slice(0, 3)
+        : handoff.next_steps;
       lines.push("", "### Next steps");
-      handoff.next_steps.forEach((step, index) => {
-        lines.push(`${index + 1}. ${step}`);
+      steps.forEach((step, index) => {
+        lines.push(`${index + 1}. ${summaryMode ? briefSummary(step, 100) : step}`);
       });
+      if (steps.length < handoff.next_steps.length) {
+        lines.push(`- (+${handoff.next_steps.length - steps.length} more)`);
+      }
     }
     if (handoff.open_questions.length > 0) {
+      const summaryMode = (content.detail ?? "summary") === "summary";
+      const questions = summaryMode
+        ? handoff.open_questions.slice(0, 3)
+        : handoff.open_questions;
       lines.push("", "### Open questions");
-      for (const question of handoff.open_questions) {
-        lines.push(`- ${question}`);
+      for (const question of questions) {
+        lines.push(
+          `- ${summaryMode ? briefSummary(question, 100) : question}`
+        );
+      }
+      if (questions.length < handoff.open_questions.length) {
+        lines.push(`- (+${handoff.open_questions.length - questions.length} more)`);
       }
     }
     if (handoff.blockers.length > 0) {
@@ -1004,9 +1174,13 @@ function buildSessionBriefMarkdown(content: SessionBriefContent): string {
 
   if (content.globalObservations && content.globalObservations.length > 0) {
     lines.push("", "## Global preferences");
-    for (const observation of content.globalObservations) {
+    const globals =
+      (content.detail ?? "summary") === "summary"
+        ? content.globalObservations.slice(0, 2)
+        : content.globalObservations;
+    for (const observation of globals) {
       const firstLine = observation.content.split("\n").find((line) => line.trim()) ?? "";
-      lines.push(`- **${observation.title}** ` + `[${observation.category}] ${firstLine.slice(0, 240)}`);
+      lines.push(`- **${observation.title}** ` + `[${observation.category}] ${firstLine.slice(0, 140)}`);
     }
   }
 
@@ -1015,28 +1189,67 @@ function buildSessionBriefMarkdown(content: SessionBriefContent): string {
   lines.push(`- Entities: ${formatCount(content.counts.entities)}`);
   lines.push(`- Links: ${formatCount(content.counts.links)}`);
 
+  if (content.codeGraph) {
+    const graph = content.codeGraph;
+    const age = formatGraphAge(graph.ageSeconds);
+    lines.push("", "## Code graph");
+    lines.push(
+      `- ${graph.files} file(s), ${graph.symbols} symbol(s), ${graph.edges} edge(s)` +
+        (age ? `; last indexed ${age}` : "")
+    );
+    if (!graph.fresh) {
+      lines.push(
+        `- STALE: ${graph.reason}. Run \`muninn index\` or \`muninn_project\` with action \`index\` before trusting graph answers.`
+      );
+    }
+  }
+
+  const briefDetail = content.detail ?? "summary";
   const keyedDecisions = content.activeDecisions.keyed;
   const unkeyedDecisions = content.activeDecisions.unkeyed;
-  if (keyedDecisions.length > 0 || unkeyedDecisions.length > 0) {
+  const decisionTotal =
+    keyedDecisions.reduce((sum, group) => sum + group.decisions.length, 0) +
+    unkeyedDecisions.length;
+  // A summary brief is a table of contents, not the archive: cap the list and
+  // tell the reader how to reach the rest with a search.
+  const decisionLimit = briefDetail === "summary" ? 10 : Number.POSITIVE_INFINITY;
+  let emittedDecisions = 0;
+  const emitDecision = (decision: Observation): void => {
+    if (emittedDecisions >= decisionLimit) return;
+    appendBriefObservation(lines, decision, false, briefDetail, 75);
+    emittedDecisions += 1;
+  };
+  if (decisionTotal > 0) {
     lines.push("", "## Active Decisions");
     for (const group of keyedDecisions) {
+      const visible = group.decisions.slice(
+        0,
+        Math.max(0, decisionLimit - emittedDecisions)
+      );
+      if (visible.length === 0) break;
       lines.push("", `### Topic: ${group.topicKey}`);
-      for (const decision of group.decisions) {
-        appendBriefObservation(lines, decision, false);
-      }
+      for (const decision of visible) emitDecision(decision);
     }
-    if (unkeyedDecisions.length > 0) {
+    if (unkeyedDecisions.length > 0 && emittedDecisions < decisionLimit) {
       lines.push("", "### Unkeyed decisions");
-      for (const decision of unkeyedDecisions) {
-        appendBriefObservation(lines, decision, false);
-      }
+      for (const decision of unkeyedDecisions) emitDecision(decision);
+    }
+    if (emittedDecisions < decisionTotal) {
+      lines.push(
+        "",
+        `_${decisionTotal - emittedDecisions} more decision(s) omitted from this summary; find them with \`muninn_search\` or the topic key._`
+      );
     }
   }
 
   if (content.recentActivity.length > 0) {
+    const activity = content.recentActivity.slice(
+      0,
+      briefDetail === "summary" ? 3 : content.recentActivity.length
+    );
     lines.push("", "## Recent Activity");
-    for (const observation of content.recentActivity) {
-      appendBriefObservation(lines, observation, true);
+    for (const observation of activity) {
+      appendBriefObservation(lines, observation, true, briefDetail, 100);
     }
   }
 
@@ -1183,7 +1396,8 @@ function assembleSessionBrief(
   selectedPaths: string[],
   budgetChars: SessionBriefBudget,
   notes: string[],
-  expandGraph: boolean = true
+  expandGraph: boolean = true,
+  detail: SessionBriefDetail = "summary"
 ): SessionBrief {
   // "all" lifts every cap, not just the character budget: a caller asking for
   // the complete brief must not silently lose the tail of each section either.
@@ -1389,6 +1603,41 @@ function assembleSessionBrief(
     globalObservations = [];
   }
 
+  let codeGraph: SessionBriefCodeGraph | null = null;
+  if (projectId) {
+    try {
+      const freshness = checkIndexFreshness(
+        {
+          db,
+          currentProject: {
+            id: projectId,
+            root_path: project.rootPath,
+            name: project.name,
+          },
+        },
+        { projectRoot: project.rootPath }
+      );
+      const graphCounts = db
+        .prepare<[string, string], { symbols: number; edges: number }>(
+          `SELECT (SELECT count(*) FROM code_symbols WHERE project_id = ?) AS symbols,
+                  (SELECT count(*) FROM code_edges WHERE project_id = ?) AS edges`
+        )
+        .get(projectId, projectId);
+      codeGraph = {
+        files: freshness.files,
+        symbols: graphCounts?.symbols ?? 0,
+        edges: graphCounts?.edges ?? 0,
+        indexedAt: freshness.indexedAt,
+        ageSeconds: freshness.ageSeconds,
+        staleFiles: freshness.staleFiles,
+        fresh: freshness.fresh,
+        reason: freshness.reason,
+      };
+    } catch {
+      codeGraph = null;
+    }
+  }
+
   const content: SessionBriefContent = {
     project,
     activeDecisions: { keyed, unkeyed },
@@ -1397,9 +1646,11 @@ function assembleSessionBrief(
     related,
     handoff,
     globalObservations,
+    codeGraph,
     counts,
     notes,
     budgetChars,
+    detail,
   };
   const rendered = renderSessionBriefWithStatus(content);
   return {
@@ -1436,6 +1687,7 @@ function buildUnavailableSessionBrief(
     counts: { observations: null, entities: null, links: null },
     notes,
     budgetChars,
+    detail: "summary",
   };
   const rendered = renderSessionBriefWithStatus(content);
   return {
@@ -1476,7 +1728,8 @@ export function readSessionBrief(
         selectedPaths,
         budgetChars,
         [],
-        expandGraph
+        expandGraph,
+        resolveSessionBriefDetail(request.detail, budgetChars)
       );
     } catch (err) {
       return buildUnavailableSessionBrief(
@@ -1512,7 +1765,8 @@ export function readSessionBrief(
       selectedPaths,
       budgetChars,
       [],
-      expandGraph
+      expandGraph,
+      resolveSessionBriefDetail(request.detail, budgetChars)
     );
   } catch (err) {
     return buildUnavailableSessionBrief(
@@ -2094,8 +2348,14 @@ export class MemoryService implements IMemoryService {
 
   /**
    * Searches observations using FTS5 BM25 relevance ranking.
-   * Query terms are safely sanitized, rank ordering is ASC (lower BM25 = higher relevance),
-   * and linked entities are attached to each result.
+   *
+   * Two tiers run over the same index. The "exact" tier keeps the historical
+   * conjunction, so path, symbol and phrase queries stay precise. The "broad"
+   * tier is a prefix-expanded disjunction and only adds rows the exact tier could
+   * not supply. Exact-tier rows keep their BM25 order and broad rows are appended
+   * with monotonically worse ranks, so a weaker match never outranks a complete
+   * one. Exact duplicates collapse to the best-ranked copy, and observations
+   * linked to an entity named in the query get a small rank boost.
    */
   public search(options: SearchOptions): SearchResult[] {
     if (!options || !options.query) {
@@ -2106,87 +2366,36 @@ export class MemoryService implements IMemoryService {
     if (!sanitized) {
       return [];
     }
-
-    const conditions: string[] = ["observations_fts MATCH ?"];
-    const params: (string | number)[] = [sanitized];
-
-    if (options.category) {
-      conditions.push("o.category = ?");
-      params.push(options.category);
+    const plan = planSearchQuery(options.query, sanitized);
+    if (!plan) {
+      return [];
     }
 
-    if (!options.includeSuperseded && !options.include_superseded) {
-      conditions.push("o.status = 'active'");
-    }
-
-    if (!options?.allProjects) {
-      const explicitProjectId =
-        options?.projectId !== undefined
-          ? options.projectId
-          : options?.project_id;
-      const targetProjectId =
-        explicitProjectId !== undefined
-          ? explicitProjectId
-          : this._currentProject.id;
-      if (targetProjectId) {
-        conditions.push("o.project_id = ?");
-        params.push(targetProjectId);
-      }
-    }
-
+    const strictMatch = options.match === "all";
+    const filter = this.searchFilter(options);
     const parsedLimit =
       typeof options?.limit === "number" && Number.isFinite(options.limit)
         ? options.limit
         : 10;
     const limit = Math.min(Math.max(1, parsedLimit), 500);
-    params.push(limit);
 
-    const sql = `
-      SELECT
-        o.id,
-        o.project_id,
-        o.category,
-        o.title,
-        o.content,
-        o.topic_key,
-        o.status,
-        o.superseded_by,
-        o.created_at,
-        o.updated_at,
-        bm25(observations_fts) AS rank
-      FROM observations_fts
-      JOIN observations o ON o.rowid = observations_fts.rowid
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY rank ASC
-      LIMIT ?
-    `;
-
-    type RowType = Observation & { rank: number };
-    let rows: RowType[];
-    try {
-      rows = this._db.prepare<any[], RowType>(sql).all(...params);
-    } catch (err: unknown) {
-      const code =
-        typeof err === "object" && err !== null && "code" in err
-          ? String((err as any).code)
-          : "";
-      const message = err instanceof Error ? err.message : String(err);
-      const isFatal =
-        code.startsWith("SQLITE_IOERR") ||
-        code.startsWith("SQLITE_CORRUPT") ||
-        code === "SQLITE_NOTADB" ||
-        code === "SQLITE_FULL" ||
-        code === "SQLITE_CANTOPEN" ||
-        /disk i\/o|corrupt|not a database|disk is full/i.test(message);
-
-      if (isFatal) {
-        console.error("Fatal SQLite error during search query:", err);
-        throw err;
-      }
-
-      console.warn("FTS search query execution failed:", message);
-      return [];
+    const exact = this.runFtsQuery(plan.exact, filter, limit);
+    let rows = exact.rows;
+    if (
+      !strictMatch &&
+      !exact.failed &&
+      (rows.length === 0 || (plan.multiTerm && rows.length < limit))
+    ) {
+      const broad = this.runFtsQuery(plan.broad, filter, limit);
+      if (!broad.failed) rows = mergeSearchRows(rows, broad.rows);
     }
+    if (!strictMatch && rows.length === 0 && !exact.failed) {
+      const substring = this.runSubstringQuery(plan.terms, filter, limit);
+      if (!substring.failed) rows = substring.rows;
+    }
+    rows = collapseDuplicateRows(rows);
+    rows = this.applyEntityBoost(rows, filter.projectId, plan.terms);
+    rows = rows.slice(0, limit);
 
     const obsIds = rows.map((r) => r.id);
     const entityMap = this._fetchEntitiesForObservations(obsIds);
@@ -2222,6 +2431,142 @@ export class MemoryService implements IMemoryService {
     }
 
     return results;
+  }
+
+  /** Resolve the SQL filters shared by every search tier. */
+  private searchFilter(options: SearchOptions): SearchFilter {
+    const explicitProjectId =
+      options?.projectId !== undefined ? options.projectId : options?.project_id;
+    const targetProjectId =
+      options?.allProjects === true
+        ? null
+        : explicitProjectId !== undefined
+          ? explicitProjectId
+          : this._currentProject.id;
+    return {
+      category: options?.category ?? null,
+      activeOnly: !options?.includeSuperseded && !options?.include_superseded,
+      projectId: targetProjectId ?? null,
+    };
+  }
+
+  /**
+   * Execute one FTS tier. A fatal SQLite error propagates; a malformed query or a
+   * recoverable error yields no rows so the other tier still gets a chance.
+   */
+  private runFtsQuery(
+    fts: string,
+    filter: SearchFilter,
+    limit: number,
+    table: "observations_fts" | "observations_trigram" = "observations_fts"
+  ): { rows: Array<Observation & { rank: number }>; failed: boolean } {
+    const conditions: string[] = [`${table} MATCH ?`];
+    const params: (string | number)[] = [fts];
+
+    if (filter.category) {
+      conditions.push("o.category = ?");
+      params.push(filter.category);
+    }
+    if (filter.activeOnly) {
+      conditions.push("o.status = 'active'");
+    }
+    if (filter.projectId) {
+      conditions.push("o.project_id = ?");
+      params.push(filter.projectId);
+    }
+    params.push(limit);
+
+    const sql = `
+      SELECT
+        o.id,
+        o.project_id,
+        o.category,
+        o.title,
+        o.content,
+        o.topic_key,
+        o.status,
+        o.superseded_by,
+        o.created_at,
+        o.updated_at,
+        bm25(${table}) AS rank
+      FROM ${table}
+      JOIN observations o ON o.rowid = ${table}.rowid
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY rank ASC
+      LIMIT ?
+    `;
+
+    try {
+      return {
+        rows: this._db.prepare<any[], Observation & { rank: number }>(sql).all(...params),
+        failed: false,
+      };
+    } catch (err: unknown) {
+      if (isFatalSqliteError(err)) {
+        console.error("Fatal SQLite error during search query:", err);
+        throw err;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn("FTS search query execution failed:", message);
+      return { rows: [], failed: true };
+    }
+  }
+
+  /**
+   * Last-resort substring recovery. The trigram tokenizer matches any substring
+   * of three characters or more, which covers compound identifiers and terms
+   * whose token boundary the stemmer does not share. It never runs when an exact
+   * or prefix match already produced rows.
+   */
+  private runSubstringQuery(
+    terms: string[],
+    filter: SearchFilter,
+    limit: number
+  ): { rows: Array<Observation & { rank: number }>; failed: boolean } {
+    const usable = terms
+      .filter((term) => term.length >= 3)
+      .slice(0, 8)
+      .map((term) => `"${term.replace(/"/g, "")}"`);
+    if (usable.length === 0) return { rows: [], failed: false };
+    return this.runFtsQuery(usable.join(" OR "), filter, limit, "observations_trigram");
+  }
+
+  /**
+   * Promote observations linked to an entity named in the query, measured on
+   * already-indexed evidence: no name or path inference.
+   */
+  private applyEntityBoost(
+    rows: Array<Observation & { rank: number }>,
+    projectId: string | null,
+    terms: string[]
+  ): Array<Observation & { rank: number }> {
+    if (rows.length === 0 || !projectId || terms.length === 0) return rows;
+    const patterns = terms
+      .slice(0, 8)
+      .map((term) => `%${term.toLocaleLowerCase()}%`);
+    let boosted: Set<string>;
+    try {
+      const where = patterns.map(() => "lower(e.identifier) LIKE ?").join(" OR ");
+      const found = this._db
+        .prepare<string[], { observation_id: string }>(
+          `SELECT DISTINCT oe.observation_id
+           FROM entities e
+           JOIN observation_entities oe ON oe.entity_id = e.id
+           WHERE e.project_id = ? AND (${where})`
+        )
+        .all(projectId, ...patterns);
+      boosted = new Set(found.map((row) => row.observation_id));
+    } catch {
+      return rows;
+    }
+    if (boosted.size === 0) return rows;
+
+    const ENTITY_BOOST = 0.5;
+    const adjusted = rows.map((row) =>
+      boosted.has(row.id) ? { ...row, rank: row.rank - ENTITY_BOOST } : row
+    );
+    adjusted.sort((left, right) => left.rank - right.rank);
+    return adjusted;
   }
 
   /**
@@ -2551,7 +2896,8 @@ export class MemoryService implements IMemoryService {
         selectedPaths,
         budgetChars,
         [],
-        expandGraph
+        expandGraph,
+        resolveSessionBriefDetail(options?.detail, budgetChars)
       );
     } catch (err) {
       return buildUnavailableSessionBrief(
@@ -2562,6 +2908,83 @@ export class MemoryService implements IMemoryService {
         this._currentProject
       );
     }
+  }
+
+  /**
+   * Collapse redundant observations within a project. Two rows are redundant when
+   * one is a `muninn-seed` extract and the other is a real session record with the
+   * same normalized title, or when their title and body are byte-identical after
+   * whitespace normalization. The redundant row is marked `superseded` (never
+   * deleted) and points at the row that was kept.
+   */
+  public dedupObservations(options?: DedupOptions): DedupReport {
+    const dryRun = options?.dryRun === true;
+    const projectId =
+      options?.projectId !== undefined
+        ? options.projectId
+        : options?.project_id !== undefined
+          ? options.project_id
+          : this._currentProject.id;
+    const rows = this._db
+      .prepare<[string], Observation>(
+        `SELECT id, project_id, category, title, content, topic_key, status,
+                superseded_by, agent, created_at, updated_at
+         FROM observations
+         WHERE project_id = ? AND status = 'active'
+         ORDER BY created_at ASC, rowid ASC`
+      )
+      .all(projectId ?? "");
+
+    const groups = new Map<string, Observation[]>();
+    for (const row of rows) {
+      const key = `${row.title.trim().replace(/\s+/g, " ").toLocaleLowerCase()}`;
+      const group = groups.get(key);
+      if (group) group.push(row);
+      else groups.set(key, [row]);
+    }
+
+    const entries: DedupEntry[] = [];
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const ranked = [...group].sort((left, right) => {
+        const leftSeed = left.agent === "muninn-seed" ? 1 : 0;
+        const rightSeed = right.agent === "muninn-seed" ? 1 : 0;
+        if (leftSeed !== rightSeed) return leftSeed - rightSeed;
+        return String(right.updated_at).localeCompare(String(left.updated_at));
+      });
+      const keeper = ranked[0]!;
+      for (const candidate of ranked.slice(1)) {
+        const sameContent =
+          normalizeForDuplicateCheck(candidate.content) ===
+          normalizeForDuplicateCheck(keeper.content);
+        const seedCopy = candidate.agent === "muninn-seed";
+        if (!sameContent && !seedCopy) continue;
+        entries.push({
+          kept: keeper.id,
+          superseded: candidate.id,
+          title: candidate.title,
+          reason: sameContent ? "identical-content" : "seeded-copy",
+        });
+      }
+    }
+
+    if (!dryRun && entries.length > 0) {
+      const supersede = this._db.prepare(
+        `UPDATE observations
+         SET status = 'superseded', superseded_by = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'active'`
+      );
+      this._db.transaction(() => {
+        for (const entry of entries) supersede.run(entry.kept, entry.superseded);
+      })();
+    }
+
+    return {
+      dryRun,
+      groups: new Set(entries.map((entry) => entry.kept)).size,
+      superseded: entries.length,
+      entries,
+    };
   }
 
   /**
